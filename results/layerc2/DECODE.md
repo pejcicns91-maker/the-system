@@ -1,0 +1,1 @@
+cells_{COIN}.parquet (release 'ledgers'): cell = codeA*(nbB+1)+codeB; bins per dial in dials_dict; last bin index = na (excluded). rate=n_cb/n; play=n_pl/n. Floor n>=50; below-floor cells counted in pair_index.n_total, not written.
