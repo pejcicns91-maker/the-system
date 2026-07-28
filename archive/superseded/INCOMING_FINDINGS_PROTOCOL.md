@@ -1,0 +1,7 @@
+# INCOMING FINDINGS — how future results enter this system (binding)
+1. **New atlas waves (W2, W3, …):** the research chat delivers an updated atlas_cells.csv (+ATLAS.html). Drop-in replace in 04_KNOWLEDGE. Card composition may cite new certified cells immediately (readings law) — rates+n printed, `cal`/`cert` tags mandatory. No card LAW changes without a version-bump note in 01/START_HERE.
+2. **New forecaster (b5/W2-B5 model file):** validate before adoption — (a) load, print its walk-forward skill/calibration strip; (b) score TODAY's walls beside hold_morning.pkl; (c) only if skill ≥ current and calibration sane, replace the pkl referenced by score_zones.py and log the swap + skill in START_HERE. The old pkl is kept (append-only).
+3. **Money candidates (C1–C4 or new):** NEVER enter cards as sized rules. Path: own sealed prereg → discovery → sealed gate → independence vs Option B → funded-ladder replay → v-increment. Until then they exist only as readings.
+4. **New components (from W2 shapes/divergences):** if a shape/relation column proves certified and ex-ante computable each morning, it may be added to score_zones context or payload fields — one at a time, validated like pi (formula must match a known reference before adoption).
+5. **Anything that fails provenance (unknown files, unverifiable parts):** quarantine, never absorb — the 2026-07-24 incident rule, permanent.
+6. **Every incorporation ends with:** the scope ledger + a one-line CHANGELOG entry in 01/START_HERE.

@@ -1,0 +1,9 @@
+# MAP v2 — DAY-TYPE ABSORPTION + WITHIN-STRATUM AUDIT (2026-07-09)
+## The audit verdict: NOTHING CERTIFIED WAS DAY-TYPE IN DISGUISE
+Every certified structure re-run inside EXPANSION/QUIET/normal strata, deviation vs the STRATUM's own base: fast×after-trend **+6.7 within normal** (amplifies to +12.6 in EXPANSION) · weekend **−6.7 within normal** · fast×fresh fade **−7.3**, slow×worn **+7.6 within normal** · VIRGIN-BREAK +5.3 · WEEKEND-WORKED-CAP **−11.2** · WORN-WALL −5.8 · POC-cascade **+21.3 within normal** (74/85 of its days are normal-stratum) · the **escalation ladder holds its shape in all three strata** (QUIET's deep rung reaches 94%) · the vote separates in all three (13.9/12.5/20.2). The map's independence is verified, not assumed.
+## Two REAL interactions the audit found (tier P, 4/4 where shown)
+1. **EXPANSION overrides the brakes**: inside EXPANSION days the weekend suppressor shrinks to −1.8 and the fast×fresh fade corner flips to +1.9 — on forecast-expansion days, do not lean on the fade/suppressor reads; the day-type outranks them.
+2. **QUIET amplifies the holds**: weekend −15.0 within QUIET, worked-cap −8.9, and the vote's spread widens to +20.2 — on forecast-quiet days the map's small dials and hold reads sharpen.
+## Absorbed (no rebuild — by design)
+M1 companion column (mint2_states.csv, standing) · payload CTX now carries the day-type as its 4th field, CB9 prints it color-coded with the [TRI] rows baked · the M5 lookup gained the day-type chips with conditional guidance cards · the Book carries the integration section · the vote deliberately UNCHANGED (a ±21pp dial would drown ±1–3pp voters; day-type is a conditioning axis like Hayden; a vote-v2 including it = a new gated test, PROPOSAL only).
+*A-111. The map is v2: same certified truths, one more regime axis, richer columns everywhere.*

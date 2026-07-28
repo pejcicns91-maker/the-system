@@ -1,0 +1,208 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+// CB12.4 — THE TRADE COPILOT
+// Lines are TRADES, not forecasts. Each numbered trade owns: an ENTRY zone,
+// a STOP zone, TP zone(s), and its trajectory line — all in its color, all
+// badged ①②③ and matched to its table rows. The table row where price sits
+// right now lights up and follows price by itself.
+// Every word in the table ships in the morning payload — nothing is canned.
+//
+// PAYLOAD (one line, from the morning run):
+//   CB12|{COIN}|{date}|UA:{u_abs}|CTX:{regime,..}|HDR:{header text}
+//   |W{n}:{lo},{hi},{comp},{contact},{flag}         ← walls (context, as before)
+//   |T{n}:{short|long},{entryLo},{entryHi},{stopLo},{stopHi},{tp1},{tp2|-},{solid|dot|dash}
+//   |G{k}:{badge 1/2/3/i}~{WHEN}~{ACTION}~{WHY}~{bandLo}:{bandHi}   (band "-" = never lit)
+//   |N:{one sentence}|OVR:{none|EXPANSION|QUIET}
+// ═══════════════════════════════════════════════════════════════════════════
+indicator("CB12.4 — Trade Copilot", overlay=true, max_boxes_count=100, max_labels_count=200, max_lines_count=100)
+
+payload  = input.text_area("", "CB12.4 payload (one line from the morning run)")
+extRight = input.int(60, "zone extension (bars)", minval=10, maxval=400)
+showK    = input.bool(false, "show research constants")
+pathLen  = input.int(48, "trajectory length (bars)", minval=12, maxval=350, group="visuals")
+tW       = input.int(2, "trajectory width", minval=1, maxval=5, group="visuals")
+tTrans   = input.int(0, "trajectory transparency", minval=0, maxval=90, group="visuals")
+zFill    = input.int(87, "trade-zone fill transparency", minval=50, maxval=100, group="visuals")
+zBord    = input.int(15, "trade-zone border transparency", minval=0, maxval=90, group="visuals")
+wFillMut = input.int(92, "wall fill transparency", minval=50, maxval=100, group="visuals")
+lbSizeS  = input.string("small", "chart label size", options=["tiny","small","normal"], group="visuals")
+tbSizeS  = input.string("small", "table text size", options=["tiny","small","normal"], group="visuals")
+c1       = input.color(#FF5A6E, "trade 1 color", group="visuals")
+c2       = input.color(#F2A93B, "trade 2 color", group="visuals")
+c3       = input.color(#D06BF0, "trade 3 color", group="visuals")
+litBg    = input.color(#4a3f14, "lit row background", group="visuals")
+litBar   = input.color(#f2c744, "lit row accent", group="visuals")
+
+lbSz = lbSizeS == "normal" ? size.normal : lbSizeS == "small" ? size.small : size.tiny
+tbSz = tbSizeS == "normal" ? size.normal : tbSizeS == "small" ? size.small : size.tiny
+
+var array<box> BXS = array.new<box>()
+var array<label> LBS = array.new<label>()
+var array<line> LNS = array.new<line>()
+f_wipe() =>
+    if array.size(BXS) > 0
+        for i = 0 to array.size(BXS) - 1
+            box.delete(array.get(BXS, i))
+        array.clear(BXS)
+    if array.size(LBS) > 0
+        for i = 0 to array.size(LBS) - 1
+            label.delete(array.get(LBS, i))
+        array.clear(LBS)
+    if array.size(LNS) > 0
+        for i = 0 to array.size(LNS) - 1
+            line.delete(array.get(LNS, i))
+        array.clear(LNS)
+f_val(array<string> parts, string key) =>
+    string out = na
+    for i = 0 to array.size(parts) - 1
+        p = array.get(parts, i)
+        if na(out) and str.startswith(p, key + ":")
+            out := str.substring(p, str.length(key) + 1)
+    out
+f_num(string s) => str.tonumber(s)
+f_heat(float c) => c >= 50 ? color.new(#4FB477, wFillMut-20) : c >= 30 ? color.new(#C9A227, wFillMut-15) : c >= 15 ? color.new(#7C8894, wFillMut-10) : color.new(#2A323B, wFillMut)
+f_tcol(string b) => b == "1" ? c1 : b == "2" ? c2 : b == "3" ? c3 : color.new(color.gray, 0)
+f_badge(string b) => b == "1" ? "①" : b == "2" ? "②" : b == "3" ? "③" : "ⓘ"
+f_sty(string s) => s == "dot" ? line.style_dotted : s == "dash" ? line.style_dashed : line.style_solid
+
+// trade zone: box + role label at left
+f_tz(float y0, float y1, color c, string txt, bool dotted) =>
+    if not na(y0) and not na(y1)
+        array.push(BXS, box.new(bar_index-5, math.max(y0,y1), bar_index+extRight, math.min(y0,y1), bgcolor=color.new(c, zFill), border_color=color.new(c, zBord), border_width=1, border_style=dotted ? line.style_dotted : line.style_solid))
+        if str.length(txt) > 0
+            array.push(LBS, label.new(bar_index-4, (y0+y1)/2, txt, style=label.style_label_right, color=color.new(color.black, 15), textcolor=c, size=lbSz))
+
+var table T = table.new(position.top_right, 2, 14, bgcolor=color.new(#1c2230, 6), border_width=1, border_color=color.new(#2a3242, 0))
+var int prevLit = -1
+bool litChanged = false
+string litMsg = ""
+
+if barstate.islast
+    f_wipe()
+    table.clear(T, 0, 0, 1, 13)
+    if not str.startswith(payload, "CB12|")
+        table.cell(T, 0, 0, "CB12.4: paste this morning's payload line", text_color=color.orange, text_halign=text.align_left, text_size=tbSz)
+    else
+        parts = str.split(payload, "|")
+        aName = array.get(parts, 1)
+        aDate = array.get(parts, 2)
+        ctx   = f_val(parts, "CTX")
+        hdr   = f_val(parts, "HDR")
+        nuance = f_val(parts, "N")
+        ovr   = f_val(parts, "OVR")
+        today = str.format_time(timenow, "yyyy-MM-dd", "America/New_York")
+        stale = aDate != today
+        mood = str.contains(ctx, "Bear") ? "bearish" : str.contains(ctx, "Bull") ? "bullish" : "choppy"
+        // ── walls (context) ──
+        wn = 0
+        for i = 0 to array.size(parts) - 1
+            p = array.get(parts, i)
+            if str.startswith(p, "W") and str.contains(p, ":") and not str.startswith(p, "WC")
+                seg = str.substring(p, str.pos(p, ":") + 1)
+                fld = str.split(seg, ",")
+                if array.size(fld) >= 5
+                    lo = f_num(array.get(fld,0))
+                    hi = f_num(array.get(fld,1))
+                    cp = f_num(array.get(fld,3))
+                    wn += 1
+                    hh = hi == lo ? lo*1.0005 : hi
+                    ll = hi == lo ? lo*0.9995 : lo
+                    array.push(BXS, box.new(bar_index-5, hh, bar_index+extRight, ll, bgcolor=f_heat(cp), border_color=color.new(#9C6FD6, 55), border_width=1))
+                    array.push(LBS, label.new(bar_index+extRight, (hh+ll)/2, "zone " + str.tostring(wn), style=label.style_label_left, color=color.new(color.black, 75), textcolor=color.new(color.gray, 20), size=size.tiny))
+        // ── trades: zones + trajectory ──
+        for tn = 1 to 3
+            tf = f_val(parts, "T" + str.tostring(tn))
+            if not na(tf)
+                f = str.split(tf, ",")
+                if array.size(f) >= 8
+                    isShort = array.get(f,0) == "short"
+                    elo = f_num(array.get(f,1))
+                    ehi = f_num(array.get(f,2))
+                    slo = f_num(array.get(f,3))
+                    shi = f_num(array.get(f,4))
+                    tp1 = f_num(array.get(f,5))
+                    tp2 = f_num(array.get(f,6))
+                    styS = array.get(f,7)
+                    tc = f_tcol(str.tostring(tn))
+                    bdg = f_badge(str.tostring(tn))
+                    dirW = isShort ? "SHORT" : "LONG"
+                    f_tz(elo, ehi, tc, bdg + " " + dirW + " " + array.get(f,1) + "–" + array.get(f,2), false)
+                    f_tz(slo, shi, tc, bdg + " stop " + array.get(f,3), true)
+                    f_tz(tp1*0.9995, tp1*1.0005, tc, bdg + " TP1 " + array.get(f,5), false)
+                    if not na(tp2)
+                        f_tz(tp2*0.9995, tp2*1.0005, tc, bdg + " TP2 " + array.get(f,6), false)
+                    // trajectory: entry mid → sweep toward stop-side edge → TP1 (→ TP2)
+                    emid = (elo + ehi) / 2
+                    sweep = isShort ? ehi : elo
+                    sg = math.max(4, pathLen / 3)
+                    x0 = bar_index + 4
+                    cc = color.new(tc, tTrans)
+                    st = f_sty(styS)
+                    array.push(LNS, line.new(x0, emid, x0+sg, sweep, xloc=xloc.bar_index, color=cc, style=st, width=tW))
+                    array.push(LNS, line.new(x0+sg, sweep, x0+2*sg, tp1, xloc=xloc.bar_index, color=cc, style=st, width=tW))
+                    endY = na(tp2) ? tp1 : tp2
+                    if not na(tp2)
+                        array.push(LNS, line.new(x0+2*sg, tp1, x0+3*sg, tp2, xloc=xloc.bar_index, color=cc, style=st, width=tW))
+                    array.push(LBS, label.new(x0+sg+(sg/2), (sweep+tp1)/2, bdg, style=label.style_label_center, color=tc, textcolor=color.new(color.black, 5), size=lbSz))
+        // ── table ──
+        int r = 0
+        table.cell(T, 0, r, "CB12.4 " + aName + (stale ? " ⚠ OLD PLAN" : ""), text_color=stale ? color.orange : #57c8e8, text_halign=text.align_left, text_size=tbSz)
+        table.cell(T, 1, r, "mood " + mood + (na(hdr) ? "" : " · " + hdr), text_color=#57c8e8, text_halign=text.align_left, text_size=tbSz)
+        r += 1
+        if not na(nuance)
+            table.cell(T, 0, r, "today", text_color=#C9A227, text_halign=text.align_left, text_size=tbSz)
+            table.cell(T, 1, r, nuance, text_color=#C9A227, text_halign=text.align_left, text_size=tbSz)
+            r += 1
+        if str.contains(ovr, "EXPANSION")
+            table.cell(T, 0, r, "★", text_color=#C9A227, text_size=tbSz)
+            table.cell(T, 1, r, "BIG-RANGE DAY — zones give way more than usual: favor breaks, skip fades", text_color=#C9A227, text_halign=text.align_left, text_size=tbSz)
+            r += 1
+        if str.contains(ovr, "QUIET")
+            table.cell(T, 0, r, "★", text_color=#6FA8D6, text_size=tbSz)
+            table.cell(T, 1, r, "DEAD-QUIET DAY — zones hold more than usual: fades favored, breaks suspect", text_color=#6FA8D6, text_halign=text.align_left, text_size=tbSz)
+            r += 1
+        // G rows — lit row = first band containing price
+        int litRow = -1
+        int gShown = 0
+        for k = 1 to 10
+            g = f_val(parts, "G" + str.tostring(k))
+            if not na(g) and r < 14
+                col = str.split(g, "~")
+                if array.size(col) >= 5
+                    bdg = array.get(col, 0)
+                    whn = array.get(col, 1)
+                    act = array.get(col, 2)
+                    why = array.get(col, 3)
+                    bnd = array.get(col, 4)
+                    bool isLit = false
+                    if bnd != "-" and litRow == -1
+                        bp = str.split(bnd, ":")
+                        if array.size(bp) == 2
+                            blo = f_num(array.get(bp, 0))
+                            bhi = f_num(array.get(bp, 1))
+                            if not na(blo) and not na(bhi) and close >= blo and close <= bhi
+                                isLit := true
+                                litRow := k
+                                litMsg := whn + ": " + act
+                    tc = f_tcol(bdg)
+                    bg = isLit ? litBg : color.new(#1c2230, 6)
+                    table.cell(T, 0, r, f_badge(bdg) + "  " + whn + (isLit ? "  ◀" : ""), text_color=isLit ? litBar : tc, bgcolor=bg, text_halign=text.align_left, text_size=tbSz)
+                    table.cell(T, 1, r, act + "\n" + why, text_color=isLit ? color.new(litBar, 10) : color.new(#d8dce6, 8), bgcolor=bg, text_halign=text.align_left, text_size=tbSz)
+                    r += 1
+                    gShown += 1
+        if gShown == 0
+            table.cell(T, 0, r, "no trade cards (T/G) in this payload — run the morning", text_color=color.orange, text_halign=text.align_left, text_size=tbSz)
+        litChanged := litRow != prevLit and prevLit != -1 and litRow != -1
+        prevLit := litRow
+
+var table K = table.new(position.bottom_right, 1, 5, bgcolor=color.new(color.black,25), border_width=1)
+if barstate.islast and showK
+    table.clear(K, 0, 0, 0, 4)
+    table.cell(K, 0, 0, "── research constants [era-proof] ──", text_color=color.aqua, text_halign=text.align_left, text_size=size.small)
+    table.cell(K, 0, 1, "LADDER: .3→66 .4→71 .5→76 .6→79 .8→85 1.0→89% through", text_color=color.white, text_halign=text.align_left, text_size=size.small)
+    table.cell(K, 0, 2, "DAY-TYPE: EXPANSION brk 64% (×fast 70%) · QUIET holds 69% (wknd 84%)", text_color=#C9A227, text_halign=text.align_left, text_size=size.small)
+    table.cell(K, 0, 3, "VOTE 3+ reject → 67% · WKND breaks 36% · WORN cap 63%", text_color=color.white, text_halign=text.align_left, text_size=size.small)
+    table.cell(K, 0, 4, "eyes not autopilot · date lists on demand", text_color=color.new(color.red,25), text_halign=text.align_left, text_size=size.small)
+
+if litChanged
+    alert("CB12.4 " + syminfo.ticker + " — plan row changed → " + litMsg, alert.freq_once_per_bar_close)

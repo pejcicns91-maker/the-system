@@ -1,0 +1,83 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+// CB10 — AT-THE-ZONE COMPUTER (M9c, 2026-07-09) · designed for the 5m chart
+// Computes LIVE as price approaches/pokes a wall: 30-min thrust class, 24h
+// drive class, area wear, weekend, wall density → the certified-cell read,
+// the 6-dial vote, and the ESCALATION LADDER rung updating with penetration.
+// Baked constants are banked/audited values only. Parity: cb10_parity_card.csv.
+// Honesty notes: (1) class cuts = the vote-frame terciles (thr .0999/.2303,
+// drv −.0268/.4959 in U); the 9-cell table's own frame differs ~0.01U — its
+// values shown here are approximation-labeled "~". (2) yd comes from payload
+// CTX (archetype not Pine-computable). (3) RSI/flip dials excluded natively
+// (unbaked cuts / needs witness) — vote shown is 6-of-9-dial, labeled.
+// ═══════════════════════════════════════════════════════════════════════════
+indicator("CB10 — At-the-Zone Computer", overlay=true, max_labels_count=50)
+
+wallLo = input.price(0.0, "Wall LOW  (from CB9 payload)")
+wallHi = input.price(0.0, "Wall HIGH (from CB9 payload)")
+uAbs   = input.float(0.0, "U absolute (price units; = U% × day open)")
+amN    = input.int(-1, "Area visits last 20d (payload; -1 = compute native approx)")
+ydIn   = input.string("churn", "Yesterday type (payload CTX)", options=["churn","lean","parked","trend","na"])
+dens   = input.int(1, "Wall member count (payload)", minval=1)
+
+ok = wallHi > 0 and uAbs > 0 and timeframe.in_seconds() == 300
+mid = (wallLo + wallHi) / 2
+below = close < wallLo
+
+// ── live dials (5m bars: 6 = 30min, 276 = 23h) ──────────────────────────
+dir = below ? 1 : -1                                  // approach direction toward wall
+thrU = dir * (close - close[6])  / uAbs
+drvU = dir * (close - close[276]) / uAbs
+thrC = thrU <= 0.0999 ? "rev" : thrU <= 0.2303 ? "slow" : "fast"
+drvC = drvU <= -0.0268 ? "calm" : drvU <= 0.4959 ? "mid" : "driven"
+// native am approx (exchange-day grain; payload value preferred)
+amNative() =>
+    c = 0
+    for i = 1 to 20
+        hh = request.security(syminfo.tickerid, "D", high[i], lookahead=barmerge.lookahead_on)
+        ll = request.security(syminfo.tickerid, "D", low[i],  lookahead=barmerge.lookahead_on)
+        c += (hh >= mid and ll <= mid) ? 1 : 0
+    c
+am = amN >= 0 ? amN : amNative()
+amC = am <= 2 ? "few" : am <= 7 ? "mid" : "many"
+wke = dayofweek == dayofweek.saturday or dayofweek == dayofweek.sunday
+
+// ── the 6-dial vote (baked sign map, T3) ─────────────────────────────────
+vThr = thrC == "fast" ? 1 : -1
+vDrv = drvC == "calm" ? 1 : drvC == "mid" ? -1 : 0
+vAm  = amC == "few" ? 1 : amC == "many" ? -1 : 0
+vYd  = ydIn == "trend" ? 1 : ydIn == "lean" ? -1 : 0
+vWk  = wke ? -1 : 1
+vDen = dens <= 2 ? 1 : 0
+vote = vThr + vDrv + vAm + vYd + vWk + vDen
+
+// ── certified 9-cell (~, frame note above): P(continue) by thr×am ───────
+cellP = thrC=="rev" ? (amC=="few"?39.3:amC=="mid"?40.4:47.1) :
+        thrC=="slow"? (amC=="few"?35.0:amC=="mid"?39.4:46.4) :
+                      (amC=="few"?27.9:amC=="mid"?30.9:40.2)
+
+// ── live penetration + escalation ladder ────────────────────────────────
+pen = below ? (high - wallHi) / uAbs : (wallLo - low) / uAbs
+var float maxPen = 0.0
+newDay = ta.change(time("D")) != 0
+if newDay
+    maxPen := 0.0
+maxPen := math.max(maxPen, math.max(pen, 0))
+ladder = maxPen >= 1.0 ? 88.6 : maxPen >= 0.8 ? 84.8 : maxPen >= 0.6 ? 79.2 : maxPen >= 0.5 ? 75.6 : maxPen >= 0.4 ? 71.1 : maxPen >= 0.3 ? 65.7 : maxPen >= 0.2 ? 59.6 : na
+
+// ── panel ────────────────────────────────────────────────────────────────
+var table T = table.new(position.top_left, 1, 8, bgcolor=color.new(color.black, 20), border_width=1)
+f(int r, string s, color c) => table.cell(T, 0, r, s, text_color=c, text_halign=text.align_left, text_size=size.small)
+if barstate.islast
+    if not ok
+        f(0, "CB10 needs: 5m chart + wall + U from CB9 payload", color.orange)
+    else
+        gap = below ? (wallLo - close) / uAbs : (close - wallHi) / uAbs
+        f(0, "CB10  wall " + str.tostring(wallLo, format.mintick) + "–" + str.tostring(wallHi, format.mintick) + "  gap " + str.tostring(math.max(gap,0), "#.##") + "U", color.aqua)
+        f(1, "thrust " + thrC + " (" + str.tostring(thrU, "#.##") + "U) · drive " + drvC + " (" + str.tostring(drvU, "#.##") + "U)", color.white)
+        f(2, "area " + amC + " (" + str.tostring(am) + "/20d) · " + (wke ? "WEEKEND" : "weekday") + " · yd " + ydIn, color.white)
+        f(3, "~cell P(continue) " + str.tostring(cellP, "#.#") + "%  [CAL, frame≈]", cellP >= 44 ? #4FB477 : cellP <= 33 ? #C0504E : color.white)
+        f(4, "VOTE (6-dial): " + (vote > 0 ? "+" : "") + str.tostring(vote) + (vote <= -3 ? "  → reject-aligned [TRI 67%]" : vote >= 3 ? "  → break-aligned [TRI ~50%]" : ""), vote <= -3 ? #4FB477 : vote >= 3 ? #C9A227 : color.silver)
+        f(5, na(ladder) ? "ladder: not engaged (max pen " + str.tostring(maxPen, "#.##") + "U)" : "LADDER: pen " + str.tostring(maxPen, "#.##") + "U → " + str.tostring(ladder, "#.#") + "% through [FULL era-proof]", na(ladder) ? color.gray : ladder >= 76 ? #C0504E : #C9A227)
+        f(6, "travel: reject med .46U · break carry .77U" + (wke ? " (wknd .37)" : ""), color.new(color.silver, 20))
+        f(7, "eyes not autopilot · numbers convert to date lists on demand", color.new(color.red, 25))

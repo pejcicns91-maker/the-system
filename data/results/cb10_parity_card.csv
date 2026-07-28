@@ -1,0 +1,11 @@
+a,d,level,thr_signed,thr_class,drv,drv_class
+BTC,2026-05-18,PWL,0.082,rev,0.893,driven
+SOL,2026-06-18,PDL,0.012,rev,1.001,driven
+ETH,2026-05-07,PWPOC,0.181,slow,1.347,driven
+ETH,2026-06-27,PSC,0.176,slow,0.053,mid
+SOL,2026-05-23,PSC,0.307,fast,-0.214,calm
+BTC,2026-05-23,PWC,0.723,fast,0.844,driven
+ETH,2026-07-01,PSPOC,,fast,-0.201,calm
+SOL,2026-05-31,PWL,0.061,rev,0.503,driven
+XRP,2026-07-02,ONH,,fast,1.524,driven
+ETH,2026-05-28,PWL,0.273,fast,-1.171,calm

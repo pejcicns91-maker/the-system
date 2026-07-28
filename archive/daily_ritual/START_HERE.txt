@@ -1,0 +1,17 @@
+THE SYSTEM — one download. (updated 2026-07-15, CB12 era)
+brief + Option B + map v2 = one workflow.
+
+ONE-TIME (5 min): TradingView → Pine editor → paste CB12_copilot.pine → add to chart.
+(CB11_system.pine = legacy fallback only.) Read THE_SYSTEM.pdf once; CB12_RENDERING.pdf
+shows the current screens; CB12_UPDATE.md says what superseded what.
+
+EVERY MORNING: attach DAILY_UPLOAD.zip (nested here; also kept separately) + your
+brief_state.zip to any AI → say "run the day". You get: the brief · the AI's MORNING
+READ (judgment, mandatory per CB12_PROTOCOL.md) · finished CB12 payload lines with
+zone plans + nuance · the updated brief_state.zip (SAVE IT — living state).
+Paste your coin's line into CB12. Midday: "recheck {coin}" for a fresh read.
+
+STATE: your device's brief_state.zip is the only home of the track record
+(STATE_README_FIRST.txt covers loss/recovery via brief_state_SEED.zip).
+LAWS: 00_MASTER_REFERENCE.md + contracts bind all work. AI_HANDOFF.md briefs any AI.
+KNOWN LIMITS: se_ref_vec hash mismatch · v5/v6 witness gap · yd field 'na' in v1 payloads.

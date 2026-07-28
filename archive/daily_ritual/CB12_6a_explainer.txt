@@ -1,0 +1,176 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+// CB12.6a — EXPLAINER (partner pane for CB12.6)
+// · Add as its own PANE (it is not an overlay). Paste the SAME one-box
+//   multi-asset payload used by CB12.6.
+// · Renders phone-width text (wrap ~42 chars), stacked downward.
+//   To scroll: drag vertically on the pane / its price scale, or maximize
+//   the pane. Row numbers on the scale are meaningless — it's a page.
+// · Chart's own asset: full explainer (header, every scenario's WHEN/DO/WHY,
+//   the day note, override flag). Other assets: minimal clear block —
+//   status line, the trades with direction/stop/targets, one-line read.
+// ═══════════════════════════════════════════════════════════════════════════
+indicator("CB12.6a — Explainer (pane)", overlay=false, max_boxes_count=500, max_lines_count=100, scale=scale.right)
+
+payload = input.text_area("", "FULL payload block — same paste as CB12.6")
+wrapN   = input.int(36, "characters per line", minval=28, maxval=64)
+tSizeS  = input.string("small", "text size", options=["tiny","small","normal"])
+cHead   = input.color(#6FC7E8, "header color")
+cBody   = input.color(#D8DCE6, "body color")
+cMut    = input.color(#8B93A3, "other-assets color")
+cWarn   = input.color(#F2A93B, "warning color")
+c1      = input.color(#2F7FD0, "① tone")
+c2      = input.color(#5CA8E6, "② tone")
+c3      = input.color(#8FD0F5, "③ tone")
+tSz = tSizeS == "normal" ? size.normal : tSizeS == "small" ? size.small : size.tiny
+
+var array<string> LT = array.new_string()
+var array<color>  LC = array.new_color()
+var array<box>    BXS = array.new<box>()
+
+f_val(array<string> parts, string key) =>
+    string out = na
+    for i = 0 to array.size(parts) - 1
+        p = array.get(parts, i)
+        if na(out) and str.startswith(p, key + ":")
+            out := str.substring(p, str.length(key) + 1)
+    out
+
+f_num(string s) => str.tonumber(s)
+
+// wrap text to width, push each visual line
+f_push(string txt, color c) =>
+    words = str.split(txt, " ")
+    string cur = ""
+    for i = 0 to array.size(words) - 1
+        w = array.get(words, i)
+        cand = cur == "" ? w : cur + " " + w
+        if str.length(cand) > wrapN and cur != ""
+            array.push(LT, cur)
+            array.push(LC, c)
+            cur := w
+        else
+            cur := cand
+    if cur != ""
+        array.push(LT, cur)
+        array.push(LC, c)
+
+f_gap() =>
+    array.push(LT, " ")
+    array.push(LC, cBody)
+
+f_bar(color c) =>
+    array.push(LT, "────────────────────────────")
+    array.push(LC, c)
+
+f_tcol(int n) => n == 1 ? c1 : n == 2 ? c2 : c3
+f_badge(int n) => n == 1 ? "①" : n == 2 ? "②" : "③"
+
+// one trade line from a T field (direction from geometry)
+f_tline(string tf, int tn) =>
+    f = str.split(tf, ",")
+    if array.size(f) >= 8
+        elo = f_num(array.get(f, 1))
+        ehi = f_num(array.get(f, 2))
+        tp1s = array.get(f, 5)
+        tp2s = array.get(f, 6)
+        isShort = f_num(tp1s) < (elo + ehi) / 2
+        dirW = isShort ? "SHORT" : "LONG"
+        tps = tp2s == "-" or tp2s == "" ? tp1s : tp1s + " → " + tp2s
+        f_push(f_badge(tn) + " " + dirW + " " + array.get(f, 1) + "–" + array.get(f, 2) + " · stop " + array.get(f, 3) + " · TP " + tps, f_tcol(tn))
+
+if barstate.islast
+    // wipe
+    if array.size(BXS) > 0
+        for i = 0 to array.size(BXS) - 1
+            box.delete(array.get(BXS, i))
+        array.clear(BXS)
+    array.clear(LT)
+    array.clear(LC)
+    // split payload into asset lines; find chart's line + the others
+    string myLine = na
+    array<string> others = array.new_string()
+    lines = str.split(payload, "\n")
+    for i = 0 to array.size(lines) - 1
+        ln = str.replace_all(array.get(lines, i), "\r", "")
+        if str.startswith(ln, "CB12|")
+            lp = str.split(ln, "|")
+            if array.size(lp) >= 3
+                coin = array.get(lp, 1)
+                if na(myLine) and str.contains(syminfo.ticker, coin)
+                    myLine := ln
+                else
+                    array.push(others, ln)
+    if na(myLine) and array.size(others) == 0
+        f_push("CB12.6a: paste the full multi-asset payload block in settings.", cWarn)
+    else
+        today = str.format_time(timenow, "yyyy-MM-dd", "America/New_York")
+        // ── the chart's asset: full explainer ──
+        if not na(myLine)
+            parts = str.split(myLine, "|")
+            coin = array.get(parts, 1)
+            aDate = array.get(parts, 2)
+            if aDate != today
+                f_push("⚠ OLD PLAN (" + aDate + ") — rerun the morning", cWarn)
+                f_gap()
+            f_push("■ " + coin + " — TODAY'S PLAN", cHead)
+            hdr = f_val(parts, "HDR")
+            if not na(hdr)
+                f_push(hdr, cHead)
+            s1f = f_val(parts, "S1")
+            if not na(s1f)
+                g1 = str.split(s1f, ",")
+                if array.size(g1) >= 4
+                    f_push("S1 " + str.upper(array.get(g1,0)) + " trig " + array.get(g1,1) + " → " + array.get(g1,2) + " · inv " + array.get(g1,3) + "  (live status chip: chart)", cWarn)
+            f_bar(cHead)
+            for tn = 1 to 3
+                tf = f_val(parts, "T" + str.tostring(tn))
+                if not na(tf)
+                    f_tline(tf, tn)
+            f_gap()
+            // G rows: badge~WHEN~ACTION~WHY~band
+            for i = 0 to array.size(parts) - 1
+                p = array.get(parts, i)
+                if str.length(p) > 2 and str.startswith(p, "G") and str.contains(p, "~")
+                    seg = str.substring(p, str.pos(p, ":") + 1)
+                    g = str.split(seg, "~")
+                    if array.size(g) >= 4
+                        bdgS = array.get(g, 0)
+                        bn = bdgS == "1" ? 1 : bdgS == "2" ? 2 : bdgS == "3" ? 3 : 0
+                        cc = bn > 0 ? f_tcol(bn) : cMut
+                        f_push((bn > 0 ? f_badge(bn) + " " : "· ") + "WHEN " + array.get(g, 1), cc)
+                        f_push("   DO " + array.get(g, 2), cBody)
+                        f_push("   why: " + array.get(g, 3), cMut)
+                        f_gap()
+            nline = f_val(parts, "N")
+            if not na(nline)
+                f_push("N: " + nline, cBody)
+            ovr = f_val(parts, "OVR")
+            if not na(ovr) and ovr != "none"
+                f_push("OVR: " + ovr, cWarn)
+        // ── the other assets: minimal clear blocks ──
+        if array.size(others) > 0
+            f_gap()
+            f_push("═══ OTHER ASSETS ═══", cMut)
+            for oi = 0 to array.size(others) - 1
+                parts = str.split(array.get(others, oi), "|")
+                coin = array.get(parts, 1)
+                f_gap()
+                f_push("■ " + coin, cHead)
+                hdr = f_val(parts, "HDR")
+                if not na(hdr)
+                    f_push(hdr, cMut)
+                for tn = 1 to 3
+                    tf = f_val(parts, "T" + str.tostring(tn))
+                    if not na(tf)
+                        f_tline(tf, tn)
+                nline = f_val(parts, "N")
+                if not na(nline)
+                    f_push("N: " + nline, cMut)
+    // ── render the page: one transparent text box per line, stacked down ──
+    n = array.size(LT)
+    if n > 0
+        x0 = last_bar_index - 220
+        x1 = last_bar_index + 160
+        for i = 0 to n - 1
+            array.push(BXS, box.new(x0, n - i, x1, n - i - 1, bgcolor=color.new(color.black, 100), border_color=color.new(color.black, 100), text=array.get(LT, i), text_halign=text.align_left, text_valign=text.align_center, text_color=array.get(LC, i), text_size=tSz))

@@ -1,0 +1,239 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+// CB12.6 — TRADE COPILOT + MAP READINGS (v6 payload: per-wall ,CLASS,PHOLD appended)  (fix: helpers moved to global scope)
+// · NO tables. Pure drawings. (CB12.5a, later, will carry the table.)
+// · All zone/trade labels sit on the RIGHT side.
+// · Everything is TIME-LOCKED: drawn from 09:00 ET of the payload's date to
+//   09:00 ET the next day. Nothing creeps with new bars.
+// · ONE paste box for ALL assets: paste the whole multi-line payload block.
+//   The script shows only the line matching the chart's symbol.
+// Payload grammar = CB12.4 (W walls, T trades). G rows ignored here (12.5a).
+// ═══════════════════════════════════════════════════════════════════════════
+indicator("CB12.6 — Trade Copilot (chart layer)", overlay=true, max_boxes_count=100, max_labels_count=200, max_lines_count=100)
+
+payload  = input.text_area("", "FULL payload block — paste ALL assets' CB12| lines")
+lbSizeS  = input.string("small", "label size", options=["tiny","small","normal"], group="visuals")
+tW       = input.int(2, "trajectory width", minval=1, maxval=5, group="visuals")
+tTrans   = input.int(0, "trajectory transparency", minval=0, maxval=90, group="visuals")
+zFill    = input.int(87, "trade-zone fill transparency", minval=50, maxval=100, group="visuals")
+zBord    = input.int(15, "trade-zone border transparency", minval=0, maxval=90, group="visuals")
+wFillMut = input.int(92, "wall fill transparency", minval=50, maxval=100, group="visuals")
+useCal   = input.bool(true, "color walls by cal-P(hold) when present", group="visuals")
+c1       = input.color(#2F7FD0, "trade 1 tone (primary)", group="visuals")
+c2       = input.color(#5CA8E6, "trade 2 tone", group="visuals")
+c3       = input.color(#8FD0F5, "trade 3 tone", group="visuals")
+lbSz = lbSizeS == "normal" ? size.normal : lbSizeS == "small" ? size.small : size.tiny
+
+var array<box> BXS = array.new<box>()
+var array<label> LBS = array.new<label>()
+var array<line> LNS = array.new<line>()
+
+f_wipe() =>
+    if array.size(BXS) > 0
+        for i = 0 to array.size(BXS) - 1
+            box.delete(array.get(BXS, i))
+        array.clear(BXS)
+    if array.size(LBS) > 0
+        for i = 0 to array.size(LBS) - 1
+            label.delete(array.get(LBS, i))
+        array.clear(LBS)
+    if array.size(LNS) > 0
+        for i = 0 to array.size(LNS) - 1
+            line.delete(array.get(LNS, i))
+        array.clear(LNS)
+
+f_val(array<string> parts, string key) =>
+    string out = na
+    for i = 0 to array.size(parts) - 1
+        p = array.get(parts, i)
+        if na(out) and str.startswith(p, key + ":")
+            out := str.substring(p, str.length(key) + 1)
+    out
+
+f_num(string s) => str.tonumber(s)
+f_heat(float c) => c >= 50 ? color.new(#4FB477, wFillMut-20) : c >= 30 ? color.new(#C9A227, wFillMut-15) : c >= 15 ? color.new(#7C8894, wFillMut-10) : color.new(#2A323B, wFillMut)
+f_tcol(int n) => n == 1 ? c1 : n == 2 ? c2 : c3
+f_badge(int n) => n == 1 ? "①" : n == 2 ? "②" : "③"
+f_sty(string s) => s == "dot" ? line.style_dotted : s == "dash" ? line.style_dashed : line.style_solid
+
+// right-side label at the locked day's right edge
+f_rlbl(int t1_, float y, string txt, color tc) =>
+    array.push(LBS, label.new(t1_, y, txt, xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.black, 25), textcolor=tc, size=lbSz))
+
+// time-locked box spanning the whole plan day
+f_tbox(int t0_, int t1_, float y0, float y1, color fillC, color bordC, string bstyle) =>
+    array.push(BXS, box.new(t0_, math.max(y0, y1), t1_, math.min(y0, y1), xloc=xloc.bar_time, bgcolor=fillC, border_color=bordC, border_width=1, border_style=bstyle == "dot" ? line.style_dotted : bstyle == "dash" ? line.style_dashed : line.style_solid))
+
+if barstate.islast
+    f_wipe()
+    // ── pick this chart's line out of the multi-asset block ──
+    string myLine = na
+    lines = str.split(payload, "\n")
+    for i = 0 to array.size(lines) - 1
+        ln = str.replace_all(array.get(lines, i), "\r", "")
+        if na(myLine) and str.startswith(ln, "CB12|")
+            lp = str.split(ln, "|")
+            if array.size(lp) >= 3
+                coin = array.get(lp, 1)
+                if str.contains(syminfo.ticker, coin)
+                    myLine := ln
+    if na(myLine)
+        array.push(LBS, label.new(bar_index, close, "CB12.5: no payload line matches " + syminfo.ticker + " — paste the full block", style=label.style_label_left, color=color.new(color.black, 30), textcolor=color.orange, size=lbSz))
+    else
+        parts = str.split(myLine, "|")
+        aDate = array.get(parts, 2)
+        // ── TIME LOCK: 09:00 ET payload day → 09:00 ET next day ──
+        yy = math.round(f_num(str.substring(aDate, 0, 4)))
+        mo = math.round(f_num(str.substring(aDate, 5, 7)))
+        dd = math.round(f_num(str.substring(aDate, 8, 10)))
+        t0 = timestamp("America/New_York", yy, mo, dd, 9, 0, 0)
+        t1 = t0 + 86400000
+        today = str.format_time(timenow, "yyyy-MM-dd", "America/New_York")
+        if aDate != today
+            array.push(LBS, label.new(t0, close, "⚠ OLD PLAN (" + aDate + ") — rerun the morning", xloc=xloc.bar_time, style=label.style_label_right, color=color.new(color.black, 20), textcolor=color.orange, size=lbSz))
+        // ── walls ──
+        wn = 0
+        for i = 0 to array.size(parts) - 1
+            p = array.get(parts, i)
+            if str.startswith(p, "W") and str.contains(p, ":") and not str.startswith(p, "WC")
+                seg = str.substring(p, str.pos(p, ":") + 1)
+                fld = str.split(seg, ",")
+                if array.size(fld) >= 5
+                    lo = f_num(array.get(fld, 0))
+                    hi = f_num(array.get(fld, 1))
+                    cp = f_num(array.get(fld, 3))
+                    cls = array.size(fld) >= 6 ? array.get(fld, 5) : ""
+                    ph  = array.size(fld) >= 7 ? f_num(array.get(fld, 6)) : na
+                    wn += 1
+                    hh = hi == lo ? lo * 1.0005 : hi
+                    ll = hi == lo ? lo * 0.9995 : lo
+                    // v6: color by calibrated P(hold) when present (green=holds, red=paper); else contact heat
+                    wcol = useCal and not na(ph) ? (ph >= 75 ? color.new(#2E7D4F, wFillMut - 22) : ph >= 45 ? color.new(#C9A227, wFillMut - 12) : color.new(#B3405A, wFillMut - 15)) : f_heat(cp)
+                    f_tbox(t0, t1, hh, ll, wcol, color.new(#9C6FD6, 55), "solid")
+                    tag = "zone " + str.tostring(wn) + (cls != "" and cls != "-" ? " · " + cls : "") + (na(ph) ? "" : " · " + str.tostring(ph, "#") + "%")
+                    zc = cls == "V" ? color.new(#FF8A5A, 10) : cls == "S" ? color.new(#4FB477, 10) : cls == "W" ? color.new(#6FA8D6, 10) : color.new(color.gray, 20)
+                    f_rlbl(t1, (hh + ll) / 2, tag, zc)
+        // ── trades: side-by-side slots across 09:00→09:00, primary leftmost, labels inside ──
+        array<int> tns = array.new_int()
+        for tn = 1 to 3
+            if not na(f_val(parts, "T" + str.tostring(tn)))
+                array.push(tns, tn)
+        nT = array.size(tns)
+        if nT > 0
+            daySpan = t1 - t0
+            for idx = 0 to nT - 1
+                tn = array.get(tns, idx)
+                tf = f_val(parts, "T" + str.tostring(tn))
+                f = str.split(tf, ",")
+                if array.size(f) >= 8
+                    elo = f_num(array.get(f, 1))
+                    ehi = f_num(array.get(f, 2))
+                    slo = f_num(array.get(f, 3))
+                    shi = f_num(array.get(f, 4))
+                    tp1 = f_num(array.get(f, 5))
+                    tp2 = f_num(array.get(f, 6))
+                    styS = array.get(f, 7)
+                    // direction from GEOMETRY (tp below entry mid = short); the word in the payload is display-only
+                    isShort = tp1 < (elo + ehi) / 2
+                    tc = f_tcol(tn)
+                    bdg = f_badge(tn)
+                    dirW = isShort ? "SHORT" : "LONG"
+                    pad = math.round(daySpan / (nT * 14))
+                    sx0 = t0 + math.round(idx * daySpan / nT) + pad
+                    sx1 = t0 + math.round((idx + 1) * daySpan / nT) - pad
+                    sxm = math.round((sx0 + sx1) / 2)
+                    // boxes in this trade's slot
+                    f_tbox(sx0, sx1, elo, ehi, color.new(tc, zFill), color.new(tc, zBord), "solid")
+                    f_tbox(sx0, sx1, slo, shi, color.new(tc, zFill + 5), color.new(tc, zBord), "dot")
+                    f_tbox(sx0, sx1, tp1 * 0.9995, tp1 * 1.0005, color.new(tc, zFill), color.new(tc, zBord), "solid")
+                    if not na(tp2)
+                        f_tbox(sx0, sx1, tp2 * 0.9995, tp2 * 1.0005, color.new(tc, zFill), color.new(tc, zBord), "solid")
+                    // labels INSIDE the boxes
+                    array.push(LBS, label.new(sxm, (elo + ehi) / 2, bdg + " " + dirW + " " + array.get(f, 1) + "–" + array.get(f, 2), xloc=xloc.bar_time, style=label.style_none, textcolor=tc, size=lbSz))
+                    array.push(LBS, label.new(sxm, (slo + shi) / 2, "stop " + array.get(f, 3), xloc=xloc.bar_time, style=label.style_none, textcolor=color.new(tc, 15), size=lbSz))
+                    array.push(LBS, label.new(sxm, tp1, "TP1 " + array.get(f, 5), xloc=xloc.bar_time, style=label.style_none, textcolor=tc, size=lbSz))
+                    if not na(tp2)
+                        array.push(LBS, label.new(sxm, tp2, "TP2 " + array.get(f, 6), xloc=xloc.bar_time, style=label.style_none, textcolor=tc, size=lbSz))
+                    // trajectory inside the slot
+                    emid = (elo + ehi) / 2
+                    sweep = isShort ? ehi : elo
+                    cc = color.new(tc, tTrans)
+                    st = f_sty(styS)
+                    w_ = sx1 - sx0
+                    xA = sx0 + math.round(w_ * 0.10)
+                    xB = sx0 + math.round(w_ * 0.40)
+                    xC = sx0 + math.round(w_ * 0.70)
+                    xD = sx0 + math.round(w_ * 0.95)
+                    array.push(LNS, line.new(xA, emid, xB, sweep, xloc=xloc.bar_time, color=cc, style=st, width=tW))
+                    array.push(LNS, line.new(xB, sweep, xC, tp1, xloc=xloc.bar_time, color=cc, style=st, width=tW))
+                    if not na(tp2)
+                        array.push(LNS, line.new(xC, tp1, xD, tp2, xloc=xloc.bar_time, color=cc, style=st, width=tW))
+                    array.push(LBS, label.new(math.round((xB + xC) / 2), (sweep + tp1) / 2, bdg, xloc=xloc.bar_time, style=label.style_label_center, color=tc, textcolor=color.new(color.black, 5), size=lbSz))
+                    // ── LIVE STATUS: filled / stopped / TP — the warning layer ──
+                    stopL = isShort ? math.max(slo, shi) : math.min(slo, shi)
+                    bool ent_ = false
+                    bool stp_ = false
+                    bool tp_ = false
+                    for off = 400 to 0
+                        tt = time[off]
+                        if not na(tt) and tt >= t0
+                            if not ent_ and low[off] <= ehi and high[off] >= elo
+                                ent_ := true
+                            if ent_ and not stp_ and (isShort ? high[off] >= stopL : low[off] <= stopL)
+                                stp_ := true
+                            if ent_ and not stp_ and (isShort ? low[off] <= tp1 : high[off] >= tp1)
+                                tp_ := true
+                    inBand = close <= ehi and close >= elo
+                    if stp_
+                        array.push(LBS, label.new(sxm, math.max(shi, ehi), "✖ " + bdg + " STOPPED — stand down", xloc=xloc.bar_time, style=label.style_label_down, color=color.new(#B3405A, 10), textcolor=color.white, size=lbSz))
+                    else if tp_
+                        array.push(LBS, label.new(sxm, tp1, "✓ " + bdg + " TP1 reached", xloc=xloc.bar_time, style=label.style_label_down, color=color.new(#2E7D4F, 10), textcolor=color.white, size=lbSz))
+                    else if inBand
+                        array.push(LBS, label.new(sxm, ehi, "● " + bdg + " LIVE HERE", xloc=xloc.bar_time, style=label.style_label_down, color=color.new(#C9A227, 10), textcolor=color.black, size=lbSz))
+                    if ent_ and not stp_ and (isShort ? (high >= stopL and high[1] < stopL) : (low <= stopL and low[1] > stopL))
+                        alert(syminfo.ticker + " " + bdg + " STOP CROSSED " + str.tostring(stopL) + " — stand down", alert.freq_once_per_bar)
+                    if (not inBand[1]) and inBand
+                        alert(syminfo.ticker + " price ENTERED " + bdg + " band " + array.get(f, 1) + "–" + array.get(f, 2) + " (" + dirW + ")", alert.freq_once_per_bar)
+
+        // ── SCENARIO SENTINEL — is S1 still primary? ──
+        array<string> scF = array.new_string()
+        array.push(scF, f_val(parts, "S1"))
+        array.push(scF, f_val(parts, "S2"))
+        array<int> scSt = array.new_int()
+        for si = 0 to 1
+            sf = array.get(scF, si)
+            int st_ = -1
+            if not na(sf)
+                g = str.split(sf, ",")
+                if array.size(g) >= 4
+                    dirL = array.get(g, 0) == "long"
+                    trg = f_num(array.get(g, 1))
+                    tgt = f_num(array.get(g, 2))
+                    inv = f_num(array.get(g, 3))
+                    st_ := 0
+                    for off = 400 to 0
+                        tt = time[off]
+                        if not na(tt) and tt >= t0 and (st_ == 0 or st_ == 1)
+                            if tt >= t0 + 18000000
+                                st_ := 4
+                            else if (tt + timeframe.in_seconds() * 1000) % 900000 == 0
+                                c_ = close[off]
+                                if st_ == 0 and (dirL ? c_ > trg : c_ < trg)
+                                    st_ := 1
+                                else if st_ == 1 and (dirL ? c_ < inv : c_ > inv)
+                                    st_ := 3
+                                else if st_ == 1 and (dirL ? c_ > tgt : c_ < tgt)
+                                    st_ := 2
+                    // arrival warning: price at the trigger RIGHT NOW
+                    if math.abs(close - trg) <= 0.15 * f_num(f_val(parts, "UA")) and math.abs(close[1] - trg) > 0.15 * f_num(f_val(parts, "UA"))
+                        alert(syminfo.ticker + " at S" + str.tostring(si + 1) + " trigger " + str.tostring(trg) + " — status: " + (st_ == 0 ? "LIVE" : st_ == 1 ? "ARMED" : st_ == 2 ? "HIT" : st_ == 3 ? "FAILED — not primary" : "DEAD (14:00)"), alert.freq_once_per_bar)
+            array.push(scSt, st_)
+        s1s = array.get(scSt, 0)
+        s2s = array.get(scSt, 1)
+        if s1s >= 0 or s2s >= 0
+            prim = (s1s == 0 or s1s == 1 or s1s == 2) ? "S1" : (s2s == 0 or s2s == 1) ? "S2" : "none"
+            nm1 = s1s == 0 ? "LIVE" : s1s == 1 ? "ARMED" : s1s == 2 ? "HIT" : s1s == 3 ? "FAILED" : s1s == 4 ? "DEAD" : "-"
+            nm2 = s2s == 0 ? "LIVE" : s2s == 1 ? "ARMED" : s2s == 2 ? "HIT" : s2s == 3 ? "FAILED" : s2s == 4 ? "DEAD" : "-"
+            chipTx = "S1 " + nm1 + " | S2 " + nm2 + " | PRIMARY: " + prim
+            chipC = prim == "S1" ? color.new(#2E7D4F, 10) : prim == "S2" ? color.new(#C9A227, 10) : color.new(#B3405A, 10)
+            array.push(LBS, label.new(bar_index + 6, high + 0.4 * f_num(f_val(parts, "UA")), chipTx, style=label.style_label_left, color=chipC, textcolor=prim == "S2" ? color.black : color.white, size=lbSz))

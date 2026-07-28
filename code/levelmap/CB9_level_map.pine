@@ -1,0 +1,96 @@
+//@version=6
+indicator("C-Bridge CB9 — Level Map", overlay=true, max_boxes_count=100, max_labels_count=200, max_lines_count=200)
+
+// ── input ────────────────────────────────────────────────────────────────
+payload = input.text_area("", "CB9 payload (paste ONE asset line from m9_emit.py)")
+showConst = input.bool(true, "Show baked constants panel (ladder/travel/Book)?")
+extRight  = input.int(60, "Wall box extension (bars)", minval=10, maxval=400)
+
+// ── registries ───────────────────────────────────────────────────────────
+var array<box>   BXS = array.new<box>()
+var array<label> LBS = array.new<label>()
+f_wipe() =>
+    if array.size(BXS) > 0
+        for i = 0 to array.size(BXS) - 1
+            box.delete(array.get(BXS, i))
+        array.clear(BXS)
+    if array.size(LBS) > 0
+        for i = 0 to array.size(LBS) - 1
+            label.delete(array.get(LBS, i))
+        array.clear(LBS)
+
+f_val(array<string> parts, string key) =>
+    string out = na
+    for i = 0 to array.size(parts) - 1
+        p = array.get(parts, i)
+        if na(out) and str.startswith(p, key + ":")
+            out := str.substring(p, str.length(key) + 1)
+    out
+
+// contact-heat color: cold grey (<15) → amber (30-50) → hot green (>50)
+f_heat(float c) =>
+    c >= 50 ? color.new(#4FB477, 55) : c >= 30 ? color.new(#C9A227, 60) : c >= 15 ? color.new(#7C8894, 70) : color.new(#2A323B, 80)
+
+// ── constants (era-proof, TRI/FULL tier — baked, never stale) ────────────
+var table K = table.new(position.bottom_right, 1, 13, bgcolor=color.new(color.black, 25), border_width=1)
+f_k(int r, string txt, color c) => table.cell(K, 0, r, txt, text_color=c, text_halign=text.align_left, text_size=size.small)
+
+// ── info panel ───────────────────────────────────────────────────────────
+var table T = table.new(position.top_right, 1, 8, bgcolor=color.new(color.black, 20), border_width=1)
+f_row(int r, string txt, color c) => table.cell(T, 0, r, txt, text_color=c, text_halign=text.align_left, text_size=size.small)
+
+if barstate.islast
+    f_wipe()
+    if not str.startswith(payload, "CB9|")
+        f_row(0, "CB9: paste a payload line from m9_emit.py", color.orange)
+    else
+        parts = str.split(payload, "|")
+        aName = array.get(parts, 1)
+        aDate = array.get(parts, 2)
+        uPct  = f_val(parts, "U")
+        ctx   = f_val(parts, "CTX")
+        scn   = f_val(parts, "SCN")
+
+        today = str.format_time(timenow, "yyyy-MM-dd", "America/New_York")
+        stale = aDate != today
+        f_row(0, "CB9  " + aName + "  " + aDate + (stale ? "  (STALE!)" : ""), stale ? color.orange : color.aqua)
+        dtc = str.contains(ctx, "EXPANSION") ? color.new(#C9A227,0) : str.contains(ctx, "QUIET") ? color.new(#6FA8D6,0) : color.white
+        f_row(1, "day U " + uPct + "%   ctx: " + ctx, dtc)
+        f_row(2, "scenarios: " + scn, str.contains(scn, "CASC") ? color.yellow : color.silver)
+        f_row(3, "arm: read walls at approach | ladder governs mid-fight", color.new(color.silver, 25))
+
+        // walls
+        wn = 0
+        for i = 0 to array.size(parts) - 1
+            p = array.get(parts, i)
+            if str.startswith(p, "W") and str.contains(p, ":") and not str.startswith(p, "WC")
+                seg = str.substring(p, str.pos(p, ":") + 1)
+                f = str.split(seg, ",")
+                if array.size(f) >= 5
+                    lo   = str.tonumber(array.get(f, 0))
+                    hi   = str.tonumber(array.get(f, 1))
+                    comp = array.get(f, 2)
+                    cpct = str.tonumber(array.get(f, 3))
+                    tags = array.get(f, 4)
+                    wn += 1
+                    hh = hi == lo ? lo * 1.0005 : hi
+                    ll = hi == lo ? lo * 0.9995 : lo
+                    array.push(BXS, box.new(bar_index - 5, hh, bar_index + extRight, ll,
+                      bgcolor=f_heat(cpct), border_color=comp == "WM" ? color.new(#9C6FD6, 30) : color.new(color.gray, 40),
+                      border_width=comp == "WM" ? 2 : 1))
+                    txt = "W" + str.tostring(wn) + " " + comp + "  " + str.tostring(cpct) + "%" + (tags == "-" ? "" : "  " + tags)
+                    array.push(LBS, label.new(bar_index + extRight, (hh + ll) / 2, txt,
+                      style=label.style_label_left, color=color.new(color.black, 60),
+                      textcolor=cpct >= 50 ? #4FB477 : cpct >= 30 ? #C9A227 : color.gray, size=size.small))
+
+        if showConst
+            f_k(0, "── BAKED (era-proof) ──", color.aqua)
+            f_k(9, "DAY-TYPE [TRI]: EXPANSION brk 64% (fastthr 70%) | QUIET holds 69% (wknd 84%)", #C9A227)
+            f_k(1, "ESCALATION: pen .3→66% .4→71% .5→76% .6→79% .8→85% 1.0→89% through", color.white)
+            f_k(2, "TRAVEL: reject med .46U (wknd .37) | break carry .77U", color.white)
+            f_k(3, "VOTE: 3+ dials reject-aligned → 67% reject [TRI]", #4FB477)
+            f_k(4, "WKND: breaks 35.6% [CAL-S] | fast×after-trend 56% break [CAL-S]", color.white)
+            f_k(5, "SCN: POC-CASC → next POC yields 62% | WC-SUPP → upside fails 75%", color.yellow)
+            f_k(6, "WORN-WALL 63% cap | WKND-WORKED-CAP 66% | VIRGIN-BREAK 55%", color.white)
+            f_k(7, "targets: next zone .16U→83% .36U→53% .87U→22% reached", color.silver)
+            f_k(8, "law: read arrival not biography | eyes not autopilot", color.new(color.red, 20))

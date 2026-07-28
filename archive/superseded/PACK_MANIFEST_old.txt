@@ -1,0 +1,28 @@
+LEVEL MAP — MASTER PACK MANIFEST (2026-07-09)
+== READ FIRST ==
+MANUAL_TRADING.md ......... how a human trades with it (daily ritual, reads, toll discipline)
+MANUAL_SYSTEM.md .......... what everything is (architecture, tiers, laws, findings)
+AI_HANDOFF.md ............. successor-AI operations (env, constants, defects, proposals incl. M9b GitHub automation)
+LEVEL_MAP_CONTRACT.md ..... enforcement charter v1 (laws, failure modes F1-F9, auditor checklist)
+LEVEL_MAP_CONTRACT_v2.md .. contract v2 (Triangle Protocol, M6-M9 scope)
+== THE PRODUCTS ==
+THE_60PCT_BOOK.md ......... every >=60% situation, tiered, + travel + escalation ladder + vote + scenarios
+M8_SCENARIO_REGISTRY.md ... named scenarios (VIRGIN-BREAK, WORN-WALL, WEEKEND-WORKED-CAP...)
+level_map_lookup_M5.jsx ... interactive lookup artifact (situation in -> banked odds out)
+m9_emit.py ................ daily payload emitter (CB9 lines)
+m9_payloads_2026-07-06.txt  real example payloads, all four coins
+CB9_level_map.pine ........ chart renderer (walls, odds, scenarios, baked constants)
+CB10_at_the_zone.pine ..... native live computer (thrust/drive/wear/vote/escalation ladder)
+cb10_parity_card.csv ...... 10 touches to eye-check CB10 vs Python
+m4_spotcheck_card.csv ..... 20 rows to eye-check the H-Div port
+== RESULTS DOCS (audit trail) ==
+M1_RECORDER_REPORT.md / M2_CONSTELLATION_RESULTS.md / M2B_TRIPLES_RESULTS.md / M3_ORDER_RESULTS.md /
+M4_INDICATOR_RESULTS.md / M4B_CB_RESULTS.md / M7_CONFLUENCE_RESULTS.md / M85_WALLS_RESULTS.md /
+M9_BRIDGE.md / DAYPATH_ARCHETYPES_RESULTS.md / m9_failure_illustration.png (why 100% automation fails)
+== DATA (regenerable; sources of every number) ==
+M1_state.parquet .......... THE state table: 135,360 level-days x 70 columns
+m2_grid.csv (3,456 constellation cells) / m2_topcell_days.csv / m4_columns.csv (at-touch 4H indicators) /
+m7_vote.csv (per-event vote) / m85_walls.csv (wall objects, 3 radii) / m3_order.csv / daypath_meta.csv /
+daypath_archetypes.csv / pmpoc_state_days.csv (the first constellation finding, 134 checkable days)
+== STANDING RIGHTS ==
+"show the date list for X" -> csv | "draw me N from anything" -> charts | one failed eye-check -> quarantine

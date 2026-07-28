@@ -1,0 +1,138 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+// CB11 — THE SYSTEM, ON ONE CHART (2026-07-09; replaces CB9 + CB10)
+// One paste a morning. Draws the day's walls (contact-odds heat, scenario
+// tags, day-type). Tap ARMED WALL # as price approaches one: computes live
+// thrust / drive / wear, the 6-dial vote, and the escalation ladder rung
+// updating with penetration. Era-proof constants baked ([TRI]/[CAL-S]/[FULL]).
+// Designed for the 5m chart. Parity cards: cb10_parity_card.csv.
+// ═══════════════════════════════════════════════════════════════════════════
+indicator("CB11 — Level Map System", overlay=true, max_boxes_count=100, max_labels_count=200)
+
+payload  = input.text_area("", "CB11 payload (one line from run_day.py)")
+armed    = input.int(0, "ARMED WALL # (0 = none; match the W# label)", minval=0)
+amN      = input.int(-1, "armed wall: area visits 20d (payload/manual; -1 = native approx)")
+densN    = input.int(1, "armed wall: member count (the W label count)", minval=1)
+extRight = input.int(60, "wall box extension", minval=10, maxval=400)
+showK    = input.bool(true, "show baked constants")
+
+var array<box> BXS = array.new<box>()
+var array<label> LBS = array.new<label>()
+f_wipe() =>
+    if array.size(BXS) > 0
+        for i = 0 to array.size(BXS) - 1
+            box.delete(array.get(BXS, i))
+        array.clear(BXS)
+    if array.size(LBS) > 0
+        for i = 0 to array.size(LBS) - 1
+            label.delete(array.get(LBS, i))
+        array.clear(LBS)
+f_val(array<string> parts, string key) =>
+    string out = na
+    for i = 0 to array.size(parts) - 1
+        p = array.get(parts, i)
+        if na(out) and str.startswith(p, key + ":")
+            out := str.substring(p, str.length(key) + 1)
+    out
+f_heat(float c) => c >= 50 ? color.new(#4FB477,55) : c >= 30 ? color.new(#C9A227,60) : c >= 15 ? color.new(#7C8894,70) : color.new(#2A323B,80)
+
+// daily series requested ONCE at global scope (Pine forbids security() inside loops)
+dailyH = request.security(syminfo.tickerid, "D", high, lookahead=barmerge.lookahead_on)
+dailyL = request.security(syminfo.tickerid, "D", low,  lookahead=barmerge.lookahead_on)
+
+// ── live state for the armed wall ────────────────────────────────────────
+var float aLo = na
+var float aHi = na
+var float uAbs = na
+var float maxPen = 0.0
+if ta.change(time("D")) != 0
+    maxPen := 0.0
+
+var table T = table.new(position.top_right, 1, 9, bgcolor=color.new(color.black,20), border_width=1)
+f_row(int r, string s, color c) => table.cell(T, 0, r, s, text_color=c, text_halign=text.align_left, text_size=size.small)
+var table K = table.new(position.bottom_right, 1, 10, bgcolor=color.new(color.black,25), border_width=1)
+f_k(int r, string s, color c) => table.cell(K, 0, r, s, text_color=c, text_halign=text.align_left, text_size=size.small)
+
+if barstate.islast
+    f_wipe()
+    table.clear(T, 0, 0, 0, 8)
+    if not str.startswith(payload, "CB9|") and not str.startswith(payload, "CB11|")
+        f_row(0, "CB11: paste the morning payload line", color.orange)
+    else
+        aLo := na
+        aHi := na
+        parts = str.split(payload, "|")
+        aName = array.get(parts, 1)
+        aDate = array.get(parts, 2)
+        ctx   = f_val(parts, "CTX")
+        scn   = f_val(parts, "SCN")
+        uaS   = f_val(parts, "UA")
+        uAbs := na(uaS) ? uAbs : str.tonumber(uaS)
+        today = str.format_time(timenow, "yyyy-MM-dd", "America/New_York")
+        stale = aDate != today
+        dtc = str.contains(ctx,"EXPANSION") ? #C9A227 : str.contains(ctx,"QUIET") ? #6FA8D6 : color.white
+        f_row(0, "CB11 " + aName + " " + aDate + (stale ? "  ⚠STALE" : ""), stale ? color.orange : color.aqua)
+        f_row(1, "ctx: " + ctx, dtc)
+        f_row(2, "scenarios: " + scn, str.contains(scn,"CASC") ? color.yellow : color.silver)
+        // walls
+        wn = 0
+        for i = 0 to array.size(parts) - 1
+            p = array.get(parts, i)
+            if str.startswith(p, "W") and str.contains(p, ":") and not str.startswith(p, "WC")
+                seg = str.substring(p, str.pos(p, ":") + 1)
+                f = str.split(seg, ",")
+                if array.size(f) >= 5
+                    lo = str.tonumber(array.get(f,0))
+                    hi = str.tonumber(array.get(f,1))
+                    comp = array.get(f,2)
+                    cp = str.tonumber(array.get(f,3))
+                    tg = array.get(f,4)
+                    wn += 1
+                    if wn == armed
+                        aLo := lo
+                        aHi := hi
+                    hh = hi == lo ? lo*1.0005 : hi
+                    ll = hi == lo ? lo*0.9995 : lo
+                    bcol = wn == armed ? color.new(#E8425A,0) : comp=="WM" ? color.new(#9C6FD6,30) : color.new(color.gray,40)
+                    array.push(BXS, box.new(bar_index-5, hh, bar_index+extRight, ll, bgcolor=f_heat(cp), border_color=bcol, border_width=wn==armed?3:comp=="WM"?2:1))
+                    array.push(LBS, label.new(bar_index+extRight, (hh+ll)/2, "W"+str.tostring(wn)+" "+comp+" "+str.tostring(cp)+"%"+(tg=="-"?"":" "+tg)+(wn==armed?"  ◀ARMED":""), style=label.style_label_left, color=color.new(color.black,60), textcolor=wn==armed?#E8425A:cp>=50?#4FB477:cp>=30?#C9A227:color.gray, size=size.small))
+        // ── armed-wall live computer ─────────────────────────────────────
+        if armed > 0 and not na(aLo) and not na(uAbs) and timeframe.in_seconds() == 300
+            mid = (aLo+aHi)/2
+            below = close < aLo
+            dir = below ? 1 : -1
+            thrU = dir*(close-close[6])/uAbs
+            drvU = dir*(close-close[288])/uAbs
+            thrC = thrU<=0.0999 ? "rev" : thrU<=0.2303 ? "slow" : "fast"
+            drvC = drvU<=-0.0268 ? "calm" : drvU<=0.4959 ? "mid" : "driven"
+            int am = amN
+            if am < 0
+                am := 0
+                for i = 1 to 20
+                    am += (dailyH[i] >= mid and dailyL[i] <= mid) ? 1 : 0
+            amC = am<=2 ? "few" : am<=7 ? "mid" : "many"
+            wke = dayofweek==dayofweek.saturday or dayofweek==dayofweek.sunday
+            vote = (thrC=="fast"?1:-1) + (drvC=="calm"?1:drvC=="mid"?-1:0) + (amC=="few"?1:amC=="many"?-1:0) + (str.contains(ctx,"trend")?1:str.contains(ctx,"lean")?-1:0) + (wke?-1:1) + (densN<=2?1:0)
+            cellP = thrC=="rev" ? (amC=="few"?39.3:amC=="mid"?40.4:47.1) : thrC=="slow" ? (amC=="few"?35.0:amC=="mid"?39.4:46.4) : (amC=="few"?27.9:amC=="mid"?30.9:40.2)
+            pen = below ? (high-aHi)/uAbs : (aLo-low)/uAbs
+            maxPen := math.max(maxPen, math.max(pen,0))
+            lad = maxPen>=1.0?88.6:maxPen>=0.8?84.8:maxPen>=0.6?79.2:maxPen>=0.5?75.6:maxPen>=0.4?71.1:maxPen>=0.3?65.7:maxPen>=0.2?59.6:na
+            gap = below ? (aLo-close)/uAbs : (close-aHi)/uAbs
+            f_row(3, "ARMED W"+str.tostring(armed)+"  gap "+str.tostring(math.max(gap,0),"#.##")+"U", #E8425A)
+            f_row(4, "thrust "+thrC+" ("+str.tostring(thrU,"#.##")+"U) · drive "+drvC+" · area "+amC+" ("+str.tostring(am)+"/20)", color.white)
+            f_row(5, "~cell P(cont) "+str.tostring(cellP,"#.#")+"% [CAL]  ·  VOTE "+(vote>0?"+":"")+str.tostring(vote)+(vote<=-3?" → reject 67% [TRI]":vote>=3?" → break-lean [TRI]":""), vote<=-3?#4FB477:vote>=3?#C9A227:color.silver)
+            f_row(6, na(lad) ? "ladder: not engaged (max "+str.tostring(maxPen,"#.##")+"U)" : "LADDER pen "+str.tostring(maxPen,"#.##")+"U → "+str.tostring(lad,"#.#")+"% through [FULL]", na(lad)?color.gray:lad>=76?#C0504E:#C9A227)
+            f_row(7, "travel: reject .46U · break +.77U"+(wke?" (wknd .37)":""), color.new(color.silver,20))
+        else if armed > 0
+            f_row(3, "armed wall needs: 5m chart + UA in payload", color.orange)
+        if showK
+            f_k(0,"── BAKED [era-proof] ──",color.aqua)
+            f_k(1,"DAY-TYPE [TRI]: EXPANSION brk 64% (×fast 70%) | QUIET holds 69% (wknd 84%)",#C9A227)
+            f_k(2,"EXPANSION overrides fades/wknd-suppressor · QUIET sharpens holds+vote",color.white)
+            f_k(3,"LADDER: .3→66 .4→71 .5→76 .6→79 .8→85 1.0→89% through",color.white)
+            f_k(4,"VOTE 3+ reject-aligned → 67% reject [TRI] · in Bull 63%",#4FB477)
+            f_k(5,"WKND breaks 36% [CAL-S] · fast×after-trend 56% brk [CAL-S]",color.white)
+            f_k(6,"POC-CASC → next POC 62% · WC-SUPP → upside fails 75%",color.yellow)
+            f_k(7,"WORN-WALL cap 63% · WKND-WORKED-CAP 66% · VIRGIN-BRK 55%",color.white)
+            f_k(8,"targets: .16U→83% .36U→53% .87U→22% reached",color.silver)
+            f_k(9,"eyes not autopilot · every number → date list on demand",color.new(color.red,25))

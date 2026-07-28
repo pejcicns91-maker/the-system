@@ -1,0 +1,54 @@
+name: W1 grind
+on:
+  workflow_dispatch:
+    inputs:
+      budget_minutes: {description: "grind minutes this run", default: "230"}
+      mode: {description: "grind | finalize", default: "grind"}
+      b4: {description: "include t2 d4 phase (0/1)", default: "0"}
+permissions: {contents: write}
+concurrency: {group: grind, cancel-in-progress: false}
+jobs:
+  grind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -q "pandas==3.0.2" numpy pyarrow scipy requests
+      - name: cache wide table
+        uses: actions/cache@v4
+        with:
+          path: |
+            bf_vantage_ALL_wide.parquet
+            bf_vantage_ALL_mf.parquet
+          key: wide-v1
+      - name: build wide table if missing
+        run: |
+          if [ ! -f bf_vantage_ALL_wide.parquet ]; then
+            mkdir -p data
+            python fetch_arch.py BTCUSDT 2017 8
+            python fetch_arch.py ETHUSDT 2017 8
+            python fetch_arch.py SOLUSDT 2020 8
+            python fetch_arch.py XRPUSDT 2018 5
+            python b1t2_mf.py
+            python b_join.py
+          fi
+      - name: grind or finalize
+        run: |
+          if [ "${{ github.event.inputs.mode }}" = "finalize" ]; then
+            python grind1.py --finalize 1 --b4 ${{ github.event.inputs.b4 }}
+          else
+            python grind1.py --budget-min ${{ github.event.inputs.budget_minutes }} --b4 ${{ github.event.inputs.b4 }}
+          fi
+      - name: commit results
+        run: |
+          git config user.name "grind-bot"; git config user.email "bot@none"
+          git add gha_state.json out_counts out_register w1_digest.csv w1_extinction.csv 2>/dev/null || true
+          git commit -m "grind chunk [skip ci]" || echo "nothing to commit"
+          git pull --rebase || true
+          git push
+      - name: artifact (b4 mode counts)
+        if: ${{ github.event.inputs.b4 == '1' }}
+        uses: actions/upload-artifact@v4
+        with: {name: b4-counts-${{ github.run_number }}, path: out_counts, retention-days: 90}

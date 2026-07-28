@@ -1,0 +1,129 @@
+//@version=6
+indicator("Hayden Divergence-Forming Bar Color", "H-DIVFORM", overlay=true)
+
+// ── Inputs ─────────────────────────────────────────────────────────
+gtf  = "⏱ Timeframe & Candles"
+tfInput    = input.timeframe("", "Divergence timeframe (blank = chart)", group=gtf)
+candleMode = input.string("Regular", "RSI candle basis", options=["Regular","Heikin-Ashi"], group=gtf)
+
+grsi = "📊 RSI"
+src = input.source(close, "Source", group=grsi)
+len = input.int(14, "RSI Length", minval=1, group=grsi)
+ad  = input.bool(false, "Length-Volatility Adjusted?", group=grsi)
+
+gst = "🚦 Hayden State Thresholds"
+ts1  = input.float(67, "Bullish crossover (66–68)",   minval=50, maxval=100, step=0.001, group=gst)
+ts2  = input.float(33, "Bearish crossunder (32–34)",  minval=0,  maxval=50,  step=0.001, group=gst)
+ts1a = input.float(61, "Bull end threshold (60–62)",  minval=50, maxval=100, step=0.001, group=gst)
+ts2a = input.float(39, "Bear end threshold (38–40)",  minval=0,  maxval=50,  step=0.001, group=gst)
+
+gdv = "〰️ Divergence"
+divLookback = input.int(1, "Prior states to compare (1–5)", minval=1, maxval=5, group=gdv)
+
+gcl = "🎨 Colors"
+colBull = input.color(#00ff0a, "Bullish divergence forming", group=gcl)
+colBear = input.color(#ff1100, "Bearish divergence forming", group=gcl)
+colTr   = input.int(0, "Transparency", minval=0, maxval=100, group=gcl)
+
+// ── RSI length-volatility adjustment (optional) ────────────────────
+adjRsi(float v, simple int l) =>
+    f = -math.pow(math.abs(math.abs(v - 50) - 50),
+          1 + math.pow(l / 14.0, 0.618) - 1) /
+          math.pow(50, math.pow(l / 14.0, 0.618) - 1) + 50
+    v > 50 ? f + 50 : -f + 50
+
+// ── Forming-divergence detector ────────────────────────────────────
+//   0 = nothing forming
+//   1 = bullish div forming  (bear state / lows: RD Bull or HD Bull)
+//   2 = bearish div forming  (bull state / highs: RD Bear or HD Bear)
+//   Returns previous bar's value (non-repainting, like the MTF fn).
+f_forming() =>
+    haC = (open + high + low + close) / 4
+    var float haO = na
+    haO := na(haO[1]) ? (open + close) / 2 : (haO[1] + haC[1]) / 2
+    haH = math.max(high, math.max(haO, haC))
+    haL = math.min(low,  math.min(haO, haC))
+    useHAf = candleMode == "Heikin-Ashi"
+    srcF = useHAf ? haC : src
+    hiF  = useHAf ? haH : high
+    loF  = useHAf ? haL : low
+
+    rsiBase = ta.rsi(srcF, len)
+    rsiF = ad ? adjRsi(rsiBase, len) : rsiBase
+
+    var int st = 0
+    if ta.crossover(rsiF, ts1)
+        st := 1
+    if ta.crossunder(rsiF, ts2)
+        st := 2
+    if st == 1 and ta.crossunder(rsiF, ts2a)
+        st := 3
+    if st == 2 and ta.crossover(rsiF, ts1a)
+        st := 3
+
+    var float runBearLow = na
+    var float runBearRsi = na
+    var array<float> pBearLows = array.new_float()
+    var array<float> pBearRsis = array.new_float()
+    var float runBullHigh = na
+    var float runBullRsi = na
+    var array<float> pBullHighs = array.new_float()
+    var array<float> pBullRsis  = array.new_float()
+
+    if st == 2
+        if na(runBearLow) or loF < runBearLow
+            runBearLow := loF
+            runBearRsi := rsiF
+    if st == 1
+        if na(runBullHigh) or hiF > runBullHigh
+            runBullHigh := hiF
+            runBullRsi  := rsiF
+
+    int code = 0
+
+    if st == 2 and not na(runBearLow) and array.size(pBearLows) > 0
+        nB = math.min(array.size(pBearLows), divLookback)
+        for i = 0 to nB - 1
+            if code == 0
+                lo = array.get(pBearLows, i)
+                rv = array.get(pBearRsis, i)
+                if (runBearLow < lo and runBearRsi > rv) or (runBearLow > lo and runBearRsi < rv)
+                    code := 1
+
+    if st == 1 and not na(runBullHigh) and array.size(pBullHighs) > 0
+        nH = math.min(array.size(pBullHighs), divLookback)
+        for i = 0 to nH - 1
+            if code == 0
+                hi = array.get(pBullHighs, i)
+                rv = array.get(pBullRsis, i)
+                if (runBullHigh > hi and runBullRsi < rv) or (runBullHigh < hi and runBullRsi > rv)
+                    code := 2
+
+    leftBear = st != 2 and st[1] == 2
+    leftBull = st != 1 and st[1] == 1
+    if leftBear and not na(runBearLow)
+        array.unshift(pBearLows, runBearLow)
+        array.unshift(pBearRsis, runBearRsi)
+        while array.size(pBearLows) > divLookback
+            array.pop(pBearLows)
+            array.pop(pBearRsis)
+        runBearLow := na
+        runBearRsi := na
+    if leftBull and not na(runBullHigh)
+        array.unshift(pBullHighs, runBullHigh)
+        array.unshift(pBullRsis,  runBullRsi)
+        while array.size(pBullHighs) > divLookback
+            array.pop(pBullHighs)
+            array.pop(pBullRsis)
+        runBullHigh := na
+        runBullRsi  := na
+
+    code[1]
+
+// ── Pull on chosen TF (non-repainting) and color bars ──────────────
+tfReal   = tfInput == "" ? timeframe.period : tfInput
+formCode = request.security(syminfo.tickerid, tfReal, f_forming(), lookahead=barmerge.lookahead_on)
+
+barcolor(formCode == 1 ? color.new(colBull, colTr) :
+         formCode == 2 ? color.new(colBear, colTr) : na,
+         title="Divergence Forming")

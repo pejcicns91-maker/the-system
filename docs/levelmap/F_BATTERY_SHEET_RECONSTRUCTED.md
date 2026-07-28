@@ -1,0 +1,6 @@
+# F BATTERY — FROZEN SHEET (RECONSTRUCTED)
+*The signed original (frozen pre-run, signed "too much to check, just go" — logged as fatigue-signing, contract F9) was delivered in the earlier battery pack and is authoritative; its verbatim text predates the retained transcripts. This reconstruction restates the frozen parameters exactly as recorded in F_BATTERY_RESULTS.md and the program record.*
+
+**Population**: all 9 certified thr×am cells × BOTH directions (fade / ride) × 5 pre-named trigger classes: T1 band-entry · T2 sweep-reclaim · T3 shelf · T4 leg-follow · T5 overnight-hold. Frozen exit geometries per class (bracket + time-stop). No cherry-picking possible by construction: the battery covers the entire decision space.
+**Costs**: dual — P0 frictionless + real (FTMO 13.5bp round trip). **Controls**: FDR across the full battery · placebo per class · floors · discovery half → SEALED half (≤/> 2023-08-31). Verdicts bind; anything passing enters the v1.2 promotion chain.
+**Result (see F_BATTERY_RESULTS.md)**: 186,208 trades · 0/~100 arms survived · best arm +0.497%/tr discovery → +0.029 P0 / −0.006 real sealed · era mirage (2021-23 trendiness) named as the mechanism. Standing quarantine trigger: one failed eye-check on any audit ticket voids the battery.

@@ -1,0 +1,765 @@
+//@version=6
+indicator("Hayden RSI — MTF + Divergence + Engulfing", "H-RSI+MDE",
+  overlay=false, max_bars_back=4999,
+  max_lines_count=500, max_labels_count=500)
+
+// ═══════════════════════════════════════════════════════════════════
+// RSI INPUTS
+// ═══════════════════════════════════════════════════════════════════
+grsi = "📊 RSI Settings 📊"
+src  = input.source(close,      "Source",                    group=grsi)
+len  = input.int(14,            "RSI Length",                group=grsi)
+cdob = input.string("Candle",   "Display: Candle / Bar / Line", options=["Candle","Bar","Line"], group=grsi)
+ad   = input.bool(false,        "Length-Volatility Adjusted?", group=grsi)
+uc   = input.color(#00ff0a,     "Bullish Color",             group=grsi)
+dc   = input.color(#ff1100,     "Bearish Color",             group=grsi)
+
+// ═══════════════════════════════════════════════════════════════════
+// RSI CALCULATION
+// ═══════════════════════════════════════════════════════════════════
+adjRsi(float v, simple int l) =>
+    f = -math.pow(math.abs(math.abs(v - 50) - 50),
+          1 + math.pow(l / 14.0, 0.618) - 1) /
+          math.pow(50, math.pow(l / 14.0, 0.618) - 1) + 50
+    v > 50 ? f + 50 : -f + 50
+
+a    = 1.0 / len
+u    = math.max(src - src[1], 0)
+d    = math.max(src[1] - src,  0)
+ruh  = a * math.max(high - close[1], 0) + (1 - a) * ta.rma(u, len)[1]
+rdh  = (1 - a) * ta.rma(d, len)[1]
+rul  = (1 - a) * ta.rma(u, len)[1]
+rdl  = a * math.max(close[1] - low, 0) + (1 - a) * ta.rma(d, len)[1]
+
+rsiha = 100 - 100 / (1 + ruh / rdh)
+rsila = 100 - 100 / (1 + rul / rdl)
+rsia  = ta.rsi(src, len)
+
+rsih = ad ? adjRsi(rsiha, len) : rsiha
+rsil = ad ? adjRsi(rsila, len) : rsila
+rsi  = ad ? adjRsi(rsia,  len) : rsia
+
+// ═══════════════════════════════════════════════════════════════════
+// RSI DISPLAY
+// ═══════════════════════════════════════════════════════════════════
+col = ta.change(rsi) > 0 ? uc : dc
+
+plotcandle(rsi[1], rsih, rsil, rsi,
+  color=cdob=="Candle"?col:na, wickcolor=cdob=="Candle"?col:na,
+  bordercolor=cdob=="Candle"?col:na, title="RSI Candles", editable=false)
+plotbar(rsi[1], rsih, rsil, rsi,
+  color=cdob=="Bar"?col:na, title="RSI Bars", editable=false)
+plot(rsi,
+  color=cdob=="Line"?col:na, title="RSI Line", editable=false)
+
+// ═══════════════════════════════════════════════════════════════════
+// TRIPLE TREND STATE INPUTS
+// ═══════════════════════════════════════════════════════════════════
+grts      = "🚦 Hayden Triple Trend State 🚦"
+showtrend = input.bool(true,  "Show RSI pane background fill?",  group=grts)
+showbc    = input.bool(true,  "Show chart bar color?",            group=grts)
+ts1       = input.float(67,   "Bullish Crossover  (66–68)",      minval=66, maxval=68, step=0.001, group=grts)
+ts2       = input.float(33,   "Bearish Crossunder (32–34)",      minval=32, maxval=34, step=0.001, group=grts)
+ts1a      = input.float(61,   "Bull end threshold (60–62)",      minval=60, maxval=62, step=0.001, group=grts)
+ts2a      = input.float(39,   "Bear end threshold (38–40)",      minval=38, maxval=40, step=0.001, group=grts)
+cbullu    = input.color(#00ff0a, "Bull Run color",               group=grts)
+cbulld    = input.color(#1b5e20, "Bull Pullback color",          group=grts)
+cbearu    = input.color(#ff1100, "Bear Run color",               group=grts)
+cbeard    = input.color(#801922, "Bear Pullback color",          group=grts)
+cbearc    = input.color(#00ff0a, "Bull Chop gradient",           group=grts)
+cbullc    = input.color(#ff1100, "Bear Chop gradient",           group=grts)
+
+grhl   = "── HLine Levels ──"
+hl100  = input.float(100,   "Top level",         group=grts)
+hl85   = input.float(85.41, "Upper Fib 1",       group=grts)
+hl76   = input.float(76.30, "Upper Fib 2",       group=grts)
+hl23   = input.float(23.61, "Lower Fib 1",       group=grts)
+hl14   = input.float(14.59, "Lower Fib 2",       group=grts)
+hl0    = input.float(0,     "Bottom level",      group=grts)
+
+hlineUcAlpha = input.int(70, "Bull hline transparency", minval=0, maxval=100, group=grts)
+hlineDcAlpha = input.int(70, "Bear hline transparency", minval=0, maxval=100, group=grts)
+hlineGrAlpha = input.int(50, "Mid hline transparency",  minval=0, maxval=100, group=grts)
+
+fillAlphaBull = input.int(80, "Bull state fill transparency",   minval=0, maxval=100, group=grts)
+fillAlphaBear = input.int(80, "Bear state fill transparency",   minval=0, maxval=100, group=grts)
+fillAlphaChop = input.int(80, "Chop state fill transparency",   minval=0, maxval=100, group=grts)
+fillAlphaSub  = input.int(80, "Bull/Bear sub-fill transparency",minval=0, maxval=100, group=grts)
+
+// ═══════════════════════════════════════════════════════════════════
+// TRIPLE TREND STATE MACHINE (local TF)
+// ═══════════════════════════════════════════════════════════════════
+var int state = 0
+if ta.crossover(rsi, ts1)
+    state := 1
+if ta.crossunder(rsi, ts2)
+    state := 2
+if state == 1 and ta.crossunder(rsi, ts2a)
+    state := 3
+if state == 2 and ta.crossover(rsi, ts1a)
+    state := 3
+
+h_top  = hline(hl100, color=color.new(uc,    hlineUcAlpha), editable=false)
+h85l   = hline(hl85,  color=color.new(uc,    hlineUcAlpha), editable=false)
+h76l   = hline(hl76,  color=color.new(uc,    hlineUcAlpha), editable=false)
+h_ts1  = hline(ts1,   color=color.new(uc,    hlineUcAlpha), editable=false)
+h_ts1a = hline(ts1a,  color=color.new(color.gray, hlineGrAlpha), editable=false)
+h50    = hline(50,    color=color.new(color.gray, hlineGrAlpha), editable=false)
+h_ts2a = hline(ts2a,  color=color.new(color.gray, hlineGrAlpha), editable=false)
+h_ts2  = hline(ts2,   color=color.new(dc,    hlineDcAlpha), editable=false)
+h23l   = hline(hl23,  color=color.new(dc,    hlineDcAlpha), editable=false)
+h14l   = hline(hl14,  color=color.new(dc,    hlineDcAlpha), editable=false)
+h_bot  = hline(hl0,   color=color.new(dc,    hlineDcAlpha), editable=false)
+
+fill(h_ts1a, h_ts1, color=showtrend and state==3 ? color.new(color.red,   fillAlphaChop) : na)
+fill(h_ts2, h_ts2a, color=showtrend and state==3 ? color.new(color.green, fillAlphaChop) : na)
+fill(h50, h_top,    color=showtrend and state==1 ? color.new(color.green, fillAlphaBull) : na)
+fill(h50, h_ts2a,   color=showtrend and state==1 ? color.new(#1b5e20,    fillAlphaSub)  : na)
+fill(h50, h_bot,    color=showtrend and state==2 ? color.new(color.red,   fillAlphaBear) : na)
+fill(h50, h_ts1a,   color=showtrend and state==2 ? color.new(#801922,    fillAlphaSub)  : na)
+
+// ═══════════════════════════════════════════════════════════════════
+// MTF STATE + DIVERGENCE LINES
+// Three independently configurable timeframes, each running the same
+// Triple Trend State Machine + divergence detection.
+//   • Trend lines above the 100 level — continuous, color = state
+//   • Div lines below the 0 level     — segments, dashed=RD dotted=HD
+//
+// Non-repainting: f_mtf() returns [state[1], divType[1]] with
+// lookahead_on, giving the previously-confirmed HTF bar's values.
+//
+// divType encoding: 0 none, 1 RD bull, 2 HD bull, 3 RD bear, 4 HD bear
+// ═══════════════════════════════════════════════════════════════════
+grmtf          = "📡 MTF State + Divergence Lines 📡"
+showMTF        = input.bool(true,    "Show MTF trend lines?",        group=grmtf)
+showMTFDiv     = input.bool(true,    "Show MTF divergence lines?",   group=grmtf)
+mtfTf1         = input.timeframe("240", "TF 1 (default 4H)",         group=grmtf)
+mtfTf2         = input.timeframe("60",  "TF 2 (default 1H)",         group=grmtf)
+mtfTf3         = input.timeframe("15",  "TF 3 (default 15m)",        group=grmtf)
+mtfY1          = input.float(110, "TF 1 trend Y level",              group=grmtf)
+mtfY2          = input.float(115, "TF 2 trend Y level",              group=grmtf)
+mtfY3          = input.float(120, "TF 3 trend Y level",              group=grmtf)
+mtfDivY1       = input.float(-10, "TF 1 div Y level",                group=grmtf)
+mtfDivY2       = input.float(-15, "TF 2 div Y level",                group=grmtf)
+mtfDivY3       = input.float(-20, "TF 3 div Y level",                group=grmtf)
+mtfWidth       = input.int(3,     "Line width", minval=1, maxval=10, group=grmtf)
+mtfShowLbl     = input.bool(true, "Show TF labels at right edge?",   group=grmtf)
+mtfDivLookback = input.int(1,     "MTF div: prior states to compare (1–5)",
+  minval=1, maxval=5,                                                group=grmtf)
+
+grmtfClr     = "── MTF Colors ──"
+mtfColBull   = input.color(#00ff0a,    "Trend Bull color",             group=grmtfClr)
+mtfColBear   = input.color(#ff1100,    "Trend Bear color",             group=grmtfClr)
+mtfColChop   = input.color(color.gray, "Trend Chop color",             group=grmtfClr)
+mtfAlphaBull = input.int(30, "Trend Bull alpha", minval=0, maxval=100, group=grmtfClr)
+mtfAlphaBear = input.int(30, "Trend Bear alpha", minval=0, maxval=100, group=grmtfClr)
+mtfAlphaChop = input.int(60, "Trend Chop alpha", minval=0, maxval=100, group=grmtfClr)
+mtfDivBull   = input.color(#00ff0a, "Div Bull color (RD/HD Bull)",     group=grmtfClr)
+mtfDivBear   = input.color(#ff1100, "Div Bear color (RD/HD Bear)",     group=grmtfClr)
+
+// ── Combined MTF function: state machine + divergence detection ───
+f_mtf() =>
+    rsi_v = ad ? adjRsi(ta.rsi(src, len), len) : ta.rsi(src, len)
+
+    // State machine
+    var int s = 0
+    if ta.crossover(rsi_v, ts1)
+        s := 1
+    if ta.crossunder(rsi_v, ts2)
+        s := 2
+    if s == 1 and ta.crossunder(rsi_v, ts2a)
+        s := 3
+    if s == 2 and ta.crossover(rsi_v, ts1a)
+        s := 3
+
+    // Running extremes + prior archives
+    var float runBearLow_m  = na
+    var float runBearRsi_m  = na
+    var array<float> priorBearLows_m = array.new_float()
+    var array<float> priorBearRsis_m = array.new_float()
+
+    var float runBullHigh_m = na
+    var float runBullRsi_m  = na
+    var array<float> priorBullHighs_m = array.new_float()
+    var array<float> priorBullRsis_m  = array.new_float()
+
+    if s == 2
+        if na(runBearLow_m) or low < runBearLow_m
+            runBearLow_m := low
+            runBearRsi_m := rsi_v
+    if s == 1
+        if na(runBullHigh_m) or high > runBullHigh_m
+            runBullHigh_m := high
+            runBullRsi_m  := rsi_v
+
+    // Divergence detection — current run extreme vs prior archived states
+    int divType = 0
+
+    if s == 2 and not na(runBearLow_m) and array.size(priorBearLows_m) > 0
+        scanN_m = math.min(array.size(priorBearLows_m), mtfDivLookback)
+        for i = 0 to scanN_m - 1
+            if divType == 0
+                pLow = array.get(priorBearLows_m, i)
+                pRsi = array.get(priorBearRsis_m, i)
+                if runBearLow_m < pLow and runBearRsi_m > pRsi
+                    divType := 1   // RD bull
+                else if runBearLow_m > pLow and runBearRsi_m < pRsi
+                    divType := 2   // HD bull
+
+    if s == 1 and not na(runBullHigh_m) and array.size(priorBullHighs_m) > 0
+        scanN_m = math.min(array.size(priorBullHighs_m), mtfDivLookback)
+        for i = 0 to scanN_m - 1
+            if divType == 0
+                pHigh = array.get(priorBullHighs_m, i)
+                pRsi  = array.get(priorBullRsis_m,  i)
+                if runBullHigh_m > pHigh and runBullRsi_m < pRsi
+                    divType := 3   // RD bear
+                else if runBullHigh_m < pHigh and runBullRsi_m > pRsi
+                    divType := 4   // HD bear
+
+    // Archive on leaving state
+    leavingBear_m = s != 2 and s[1] == 2
+    leavingBull_m = s != 1 and s[1] == 1
+
+    if leavingBear_m and not na(runBearLow_m)
+        array.unshift(priorBearLows_m, runBearLow_m)
+        array.unshift(priorBearRsis_m, runBearRsi_m)
+        while array.size(priorBearLows_m) > mtfDivLookback
+            array.pop(priorBearLows_m)
+            array.pop(priorBearRsis_m)
+        runBearLow_m := na
+        runBearRsi_m := na
+
+    if leavingBull_m and not na(runBullHigh_m)
+        array.unshift(priorBullHighs_m, runBullHigh_m)
+        array.unshift(priorBullRsis_m,  runBullRsi_m)
+        while array.size(priorBullHighs_m) > mtfDivLookback
+            array.pop(priorBullHighs_m)
+            array.pop(priorBullRsis_m)
+        runBullHigh_m := na
+        runBullRsi_m  := na
+
+    [s[1], divType[1]]
+
+[state_tf1, divType_tf1] = request.security(syminfo.tickerid, mtfTf1, f_mtf(), lookahead=barmerge.lookahead_on)
+[state_tf2, divType_tf2] = request.security(syminfo.tickerid, mtfTf2, f_mtf(), lookahead=barmerge.lookahead_on)
+[state_tf3, divType_tf3] = request.security(syminfo.tickerid, mtfTf3, f_mtf(), lookahead=barmerge.lookahead_on)
+
+// ── Trend lines ───────────────────────────────────────────────────
+f_stateColor(int s) =>
+    s == 1 ? color.new(mtfColBull, mtfAlphaBull) :
+     s == 2 ? color.new(mtfColBear, mtfAlphaBear) :
+              color.new(mtfColChop, mtfAlphaChop)
+
+mtfClr1 = f_stateColor(state_tf1)
+mtfClr2 = f_stateColor(state_tf2)
+mtfClr3 = f_stateColor(state_tf3)
+
+plot(showMTF ? mtfY1 : na, color=mtfClr1, linewidth=mtfWidth, style=plot.style_linebr, title="MTF Trend TF1", editable=false)
+plot(showMTF ? mtfY2 : na, color=mtfClr2, linewidth=mtfWidth, style=plot.style_linebr, title="MTF Trend TF2", editable=false)
+plot(showMTF ? mtfY3 : na, color=mtfClr3, linewidth=mtfWidth, style=plot.style_linebr, title="MTF Trend TF3", editable=false)
+
+// ── Divergence lines (line objects for dashed/dotted styling) ─────
+// Line is created at the bar where divType transitions from the
+// previous value, and extended each bar while divType stays the
+// same. On transition (to 0 or to a different non-zero type) the
+// old line is left frozen on the chart and a new one starts if the
+// new type is non-zero.
+
+f_divColor(int d) =>
+    (d == 1 or d == 2) ? color.new(mtfDivBull, 0) :
+     (d == 3 or d == 4) ? color.new(mtfDivBear, 0) :
+                          color.new(color.gray, 100)
+
+f_divStyle(int d) =>
+    (d == 1 or d == 3) ? line.style_dashed : line.style_dotted
+
+var line tf1DivLine = na
+var int  tf1LastDiv = 0
+var line tf2DivLine = na
+var int  tf2LastDiv = 0
+var line tf3DivLine = na
+var int  tf3LastDiv = 0
+
+if showMTFDiv
+    // TF1
+    if divType_tf1 != tf1LastDiv
+        if divType_tf1 != 0
+            tf1DivLine := line.new(bar_index, mtfDivY1, bar_index, mtfDivY1,
+              color=f_divColor(divType_tf1), width=mtfWidth, style=f_divStyle(divType_tf1))
+        tf1LastDiv := divType_tf1
+    else if divType_tf1 != 0 and not na(tf1DivLine)
+        line.set_x2(tf1DivLine, bar_index)
+
+    // TF2
+    if divType_tf2 != tf2LastDiv
+        if divType_tf2 != 0
+            tf2DivLine := line.new(bar_index, mtfDivY2, bar_index, mtfDivY2,
+              color=f_divColor(divType_tf2), width=mtfWidth, style=f_divStyle(divType_tf2))
+        tf2LastDiv := divType_tf2
+    else if divType_tf2 != 0 and not na(tf2DivLine)
+        line.set_x2(tf2DivLine, bar_index)
+
+    // TF3
+    if divType_tf3 != tf3LastDiv
+        if divType_tf3 != 0
+            tf3DivLine := line.new(bar_index, mtfDivY3, bar_index, mtfDivY3,
+              color=f_divColor(divType_tf3), width=mtfWidth, style=f_divStyle(divType_tf3))
+        tf3LastDiv := divType_tf3
+    else if divType_tf3 != 0 and not na(tf3DivLine)
+        line.set_x2(tf3DivLine, bar_index)
+
+// ── Right-edge TF labels (for both trend and div levels) ──────────
+var label tf1Lbl    = na
+var label tf2Lbl    = na
+var label tf3Lbl    = na
+var label tf1DivLbl = na
+var label tf2DivLbl = na
+var label tf3DivLbl = na
+
+if mtfShowLbl and barstate.islast
+    if not na(tf1Lbl)
+        label.delete(tf1Lbl)
+    if not na(tf2Lbl)
+        label.delete(tf2Lbl)
+    if not na(tf3Lbl)
+        label.delete(tf3Lbl)
+    if not na(tf1DivLbl)
+        label.delete(tf1DivLbl)
+    if not na(tf2DivLbl)
+        label.delete(tf2DivLbl)
+    if not na(tf3DivLbl)
+        label.delete(tf3DivLbl)
+    if showMTF
+        tf1Lbl := label.new(bar_index + 3, mtfY1, mtfTf1, color=color.new(color.black, 100), textcolor=color.gray, style=label.style_none, size=size.small)
+        tf2Lbl := label.new(bar_index + 3, mtfY2, mtfTf2, color=color.new(color.black, 100), textcolor=color.gray, style=label.style_none, size=size.small)
+        tf3Lbl := label.new(bar_index + 3, mtfY3, mtfTf3, color=color.new(color.black, 100), textcolor=color.gray, style=label.style_none, size=size.small)
+    if showMTFDiv
+        tf1DivLbl := label.new(bar_index + 3, mtfDivY1, mtfTf1, color=color.new(color.black, 100), textcolor=color.gray, style=label.style_none, size=size.small)
+        tf2DivLbl := label.new(bar_index + 3, mtfDivY2, mtfTf2, color=color.new(color.black, 100), textcolor=color.gray, style=label.style_none, size=size.small)
+        tf3DivLbl := label.new(bar_index + 3, mtfDivY3, mtfTf3, color=color.new(color.black, 100), textcolor=color.gray, style=label.style_none, size=size.small)
+
+// ═══════════════════════════════════════════════════════════════════
+// DIVERGENCE — RAW STATE, HAYDEN RULES (local TF)
+//
+//   RD Bull = price LL + RSI HL, in BEAR context  → green
+//   RD Bear = price HH + RSI LH, in BULL context  → red
+//   HD Bull = price HL + RSI LL, in BEAR context  → green
+//   HD Bear = price LH + RSI HH, in BULL context  → red
+// ═══════════════════════════════════════════════════════════════════
+grdiv          = "〰️ Divergence Detection (local TF) 〰️"
+showDiv        = input.bool(true,  "Show divergences?",                      group=grdiv)
+divLookback    = input.int(1,      "Prior states to compare (1–5)",
+  minval=1, maxval=5,                                                         group=grdiv)
+divLineWidth   = input.int(2,      "Line width", minval=1, maxval=10,        group=grdiv)
+divRdStyle     = input.string("Dashed", "Regular div style",
+  options=["Solid","Dashed","Dotted"],                                        group=grdiv)
+divHdStyle     = input.string("Dotted", "Hidden div style",
+  options=["Solid","Dashed","Dotted"],                                        group=grdiv)
+divColorBull   = input.color(#00ff0a, "Bullish div color (RD Bull, HD Bull)",group=grdiv)
+divColorBear   = input.color(#ff1100, "Bearish div color (RD Bear, HD Bear)",group=grdiv)
+divAlpha       = input.int(0, "Div line transparency", minval=0, maxval=100, group=grdiv)
+divLabelSize   = input.string(size.small, "Label size",
+  options=[size.tiny, size.small, size.normal, size.large, size.huge],        group=grdiv)
+divLabelTxtC   = input.color(color.white, "Label text color",                group=grdiv)
+divLabelOffY   = input.float(3.0, "Label Y offset",                          group=grdiv)
+divFormingTxt  = input.string(" [forming]", "Suffix while forming",          group=grdiv)
+
+lineStyleFrom(simple string s) =>
+    s == "Solid"  ? line.style_solid :
+     s == "Dotted" ? line.style_dotted : line.style_dashed
+
+leavingBear = state != 2 and state[1] == 2
+leavingBull = state != 1 and state[1] == 1
+
+var float runBearLow    = na
+var float runBearRsi    = na
+var int   runBearLowBar = na
+
+var array<float> priorBearLows = array.new_float()
+var array<float> priorBearRsis = array.new_float()
+var array<int>   priorBearBars = array.new_int()
+
+if state == 2
+    if na(runBearLow) or low < runBearLow
+        runBearLow    := low
+        runBearRsi    := rsi
+        runBearLowBar := bar_index
+
+var float runBullHigh    = na
+var float runBullRsi     = na
+var int   runBullHighBar = na
+
+var array<float> priorBullHighs = array.new_float()
+var array<float> priorBullRsis  = array.new_float()
+var array<int>   priorBullBars  = array.new_int()
+
+if state == 1
+    if na(runBullHigh) or high > runBullHigh
+        runBullHigh    := high
+        runBullRsi     := rsi
+        runBullHighBar := bar_index
+
+// Bear-trend (lows) divergence
+var line  bearDivLine  = na
+var label bearDivLabel = na
+
+if showDiv and state == 2 and not na(runBearLow) and array.size(priorBearLows) > 0
+    int   foundIdx = -1
+    float aLow     = na
+    float aRsi     = na
+    int   aBar     = na
+    bool  isRDBull = false
+    bool  isHDBull = false
+    int   scanN    = math.min(array.size(priorBearLows), divLookback)
+    for i = 0 to scanN - 1
+        if foundIdx == -1
+            pLow = array.get(priorBearLows, i)
+            pRsi = array.get(priorBearRsis, i)
+            pBar = array.get(priorBearBars, i)
+            tRD  = runBearLow < pLow and runBearRsi > pRsi
+            tHD  = runBearLow > pLow and runBearRsi < pRsi
+            if tRD or tHD
+                foundIdx := i
+                aLow     := pLow
+                aRsi     := pRsi
+                aBar     := pBar
+                isRDBull := tRD
+                isHDBull := tHD
+
+    if foundIdx >= 0
+        clr  = color.new(divColorBull, divAlpha)
+        styl = isRDBull ? lineStyleFrom(divRdStyle) : lineStyleFrom(divHdStyle)
+        txt  = (isRDBull ? "RD Bull" : "HD Bull") + divFormingTxt
+
+        if na(bearDivLine)
+            bearDivLine := line.new(
+              x1=aBar,         y1=aRsi,
+              x2=runBearLowBar, y2=runBearRsi,
+              color=clr, width=divLineWidth, style=styl)
+            bearDivLabel := label.new(
+              x=runBearLowBar, y=runBearRsi - divLabelOffY,
+              text=txt, color=clr, textcolor=divLabelTxtC,
+              style=label.style_label_up, size=divLabelSize)
+        else
+            line.set_xy1(bearDivLine,      aBar, aRsi)
+            line.set_xy2(bearDivLine,      runBearLowBar, runBearRsi)
+            line.set_color(bearDivLine,    clr)
+            line.set_style(bearDivLine,    styl)
+            label.set_x(bearDivLabel,      runBearLowBar)
+            label.set_y(bearDivLabel,      runBearRsi - divLabelOffY)
+            label.set_text(bearDivLabel,   txt)
+            label.set_color(bearDivLabel,  clr)
+    else
+        if not na(bearDivLine)
+            line.delete(bearDivLine)
+            bearDivLine := na
+        if not na(bearDivLabel)
+            label.delete(bearDivLabel)
+            bearDivLabel := na
+
+if leavingBear and not na(runBearLow)
+    if not na(bearDivLine) and array.size(priorBearLows) > 0
+        int   fIdx     = -1
+        float fLow     = na
+        float fRsi     = na
+        int   fBar     = na
+        bool  fRDBull  = false
+        bool  fHDBull  = false
+        int   fScanN   = math.min(array.size(priorBearLows), divLookback)
+        for i = 0 to fScanN - 1
+            if fIdx == -1
+                pLow = array.get(priorBearLows, i)
+                pRsi = array.get(priorBearRsis, i)
+                pBar = array.get(priorBearBars, i)
+                tRD  = runBearLow < pLow and runBearRsi > pRsi
+                tHD  = runBearLow > pLow and runBearRsi < pRsi
+                if tRD or tHD
+                    fIdx    := i
+                    fLow    := pLow
+                    fRsi    := pRsi
+                    fBar    := pBar
+                    fRDBull := tRD
+                    fHDBull := tHD
+        if fIdx >= 0
+            fClr  = color.new(divColorBull, divAlpha)
+            fStyl = fRDBull ? lineStyleFrom(divRdStyle) : lineStyleFrom(divHdStyle)
+            fTxt  = fRDBull ? "RD Bull" : "HD Bull"
+            line.set_xy1(bearDivLine,     fBar, fRsi)
+            line.set_xy2(bearDivLine,     runBearLowBar, runBearRsi)
+            line.set_color(bearDivLine,   fClr)
+            line.set_style(bearDivLine,   fStyl)
+            label.set_x(bearDivLabel,     runBearLowBar)
+            label.set_y(bearDivLabel,     runBearRsi - divLabelOffY)
+            label.set_text(bearDivLabel,  fTxt)
+            label.set_color(bearDivLabel, fClr)
+        bearDivLine  := na
+        bearDivLabel := na
+
+    array.unshift(priorBearLows, runBearLow)
+    array.unshift(priorBearRsis, runBearRsi)
+    array.unshift(priorBearBars, runBearLowBar)
+    while array.size(priorBearLows) > divLookback
+        array.pop(priorBearLows)
+        array.pop(priorBearRsis)
+        array.pop(priorBearBars)
+
+    runBearLow    := na
+    runBearRsi    := na
+    runBearLowBar := na
+
+// Bull-trend (highs) divergence
+var line  bullDivLine  = na
+var label bullDivLabel = na
+
+if showDiv and state == 1 and not na(runBullHigh) and array.size(priorBullHighs) > 0
+    int   foundIdx2 = -1
+    float aHigh    = na
+    float aRsi2    = na
+    int   aBar2    = na
+    bool  isRDBear = false
+    bool  isHDBear = false
+    int   scanN2   = math.min(array.size(priorBullHighs), divLookback)
+    for i = 0 to scanN2 - 1
+        if foundIdx2 == -1
+            pHigh = array.get(priorBullHighs, i)
+            pRsi  = array.get(priorBullRsis,  i)
+            pBar  = array.get(priorBullBars,  i)
+            tRD   = runBullHigh > pHigh and runBullRsi < pRsi
+            tHD   = runBullHigh < pHigh and runBullRsi > pRsi
+            if tRD or tHD
+                foundIdx2 := i
+                aHigh     := pHigh
+                aRsi2     := pRsi
+                aBar2     := pBar
+                isRDBear  := tRD
+                isHDBear  := tHD
+
+    if foundIdx2 >= 0
+        clr  = color.new(divColorBear, divAlpha)
+        styl = isRDBear ? lineStyleFrom(divRdStyle) : lineStyleFrom(divHdStyle)
+        txt  = (isRDBear ? "RD Bear" : "HD Bear") + divFormingTxt
+
+        if na(bullDivLine)
+            bullDivLine := line.new(
+              x1=aBar2,          y1=aRsi2,
+              x2=runBullHighBar, y2=runBullRsi,
+              color=clr, width=divLineWidth, style=styl)
+            bullDivLabel := label.new(
+              x=runBullHighBar, y=runBullRsi + divLabelOffY,
+              text=txt, color=clr, textcolor=divLabelTxtC,
+              style=label.style_label_down, size=divLabelSize)
+        else
+            line.set_xy1(bullDivLine,      aBar2, aRsi2)
+            line.set_xy2(bullDivLine,      runBullHighBar, runBullRsi)
+            line.set_color(bullDivLine,    clr)
+            line.set_style(bullDivLine,    styl)
+            label.set_x(bullDivLabel,      runBullHighBar)
+            label.set_y(bullDivLabel,      runBullRsi + divLabelOffY)
+            label.set_text(bullDivLabel,   txt)
+            label.set_color(bullDivLabel,  clr)
+    else
+        if not na(bullDivLine)
+            line.delete(bullDivLine)
+            bullDivLine := na
+        if not na(bullDivLabel)
+            label.delete(bullDivLabel)
+            bullDivLabel := na
+
+if leavingBull and not na(runBullHigh)
+    if not na(bullDivLine) and array.size(priorBullHighs) > 0
+        int   fIdx2    = -1
+        float fHigh    = na
+        float fRsi2    = na
+        int   fBar2    = na
+        bool  fRDBear  = false
+        bool  fHDBear  = false
+        int   fScanN2  = math.min(array.size(priorBullHighs), divLookback)
+        for i = 0 to fScanN2 - 1
+            if fIdx2 == -1
+                pHigh = array.get(priorBullHighs, i)
+                pRsi  = array.get(priorBullRsis,  i)
+                pBar  = array.get(priorBullBars,  i)
+                tRD   = runBullHigh > pHigh and runBullRsi < pRsi
+                tHD   = runBullHigh < pHigh and runBullRsi > pRsi
+                if tRD or tHD
+                    fIdx2   := i
+                    fHigh   := pHigh
+                    fRsi2   := pRsi
+                    fBar2   := pBar
+                    fRDBear := tRD
+                    fHDBear := tHD
+        if fIdx2 >= 0
+            fClr  = color.new(divColorBear, divAlpha)
+            fStyl = fRDBear ? lineStyleFrom(divRdStyle) : lineStyleFrom(divHdStyle)
+            fTxt  = fRDBear ? "RD Bear" : "HD Bear"
+            line.set_xy1(bullDivLine,     fBar2, fRsi2)
+            line.set_xy2(bullDivLine,     runBullHighBar, runBullRsi)
+            line.set_color(bullDivLine,   fClr)
+            line.set_style(bullDivLine,   fStyl)
+            label.set_x(bullDivLabel,     runBullHighBar)
+            label.set_y(bullDivLabel,     runBullRsi + divLabelOffY)
+            label.set_text(bullDivLabel,  fTxt)
+            label.set_color(bullDivLabel, fClr)
+        bullDivLine  := na
+        bullDivLabel := na
+
+    array.unshift(priorBullHighs, runBullHigh)
+    array.unshift(priorBullRsis,  runBullRsi)
+    array.unshift(priorBullBars,  runBullHighBar)
+    while array.size(priorBullHighs) > divLookback
+        array.pop(priorBullHighs)
+        array.pop(priorBullRsis)
+        array.pop(priorBullBars)
+
+    runBullHigh    := na
+    runBullRsi     := na
+    runBullHighBar := na
+
+// ═══════════════════════════════════════════════════════════════════
+// ENGULFING — TIERED L/M/H SIGNALS (with body buffer)
+// ═══════════════════════════════════════════════════════════════════
+greng = "🕯 Engulfing Signals 🕯"
+showEng         = input.bool(true,  "Show engulfing signals?",          group=greng)
+requireOppCandle= input.bool(true,  "Require opposite price candle?",   group=greng)
+engBufPct       = input.float(1.0,  "Body buffer (% of prev body)",
+  minval=0, maxval=20, step=0.1,                                         group=greng)
+wickPctEng      = input.float(50.0, "Max total wick % of body",
+  minval=0, maxval=500, step=5,                                          group=greng)
+slopeLenEng     = input.int(40,     "Slope lookback (bars)",
+  minval=1, maxval=500,                                                  group=greng)
+compLen         = input.int(20,     "Prior move lookback (bars)",
+  minval=5, maxval=200,                                                  group=greng)
+
+grP1 = "   P1 — Body size"
+p1_H = input.float(10.0, "H: body ≥",   minval=0, group=grP1)
+p1_M = input.float(5.0,  "M: body ≥",   minval=0, group=grP1)
+
+grP2 = "   P2 — RSI open level"
+p2_bull_H = input.float(20.0, "Bull H: RSI open ≤", group=grP2)
+p2_bull_M = input.float(30.0, "Bull M: RSI open ≤", group=grP2)
+p2_bull_L = input.float(40.0, "Bull L: RSI open ≤", group=grP2)
+p2_bear_H = input.float(80.0, "Bear H: RSI open ≥", group=grP2)
+p2_bear_M = input.float(70.0, "Bear M: RSI open ≥", group=grP2)
+p2_bear_L = input.float(60.0, "Bear L: RSI open ≥", group=grP2)
+
+grP3 = "   P3 — Prior move intensity"
+p3_H = input.float(43.0, "H: intensity ≤", group=grP3)
+p3_M = input.float(55.0, "M: intensity ≤", group=grP3)
+
+grEngVis = "   Engulfing display"
+engLabelSize = input.string(size.normal, "Label size",
+  options=[size.tiny, size.small, size.normal, size.large, size.huge], group=grEngVis)
+engColorBull = input.color(#00ff0a, "Bull engulf color", group=grEngVis)
+engColorBear = input.color(#ff1100, "Bear engulf color", group=grEngVis)
+engFlashBull = input.color(color.white,  "Bull flash bar color", group=grEngVis)
+engFlashBear = input.color(color.yellow, "Bear flash bar color", group=grEngVis)
+
+rsiO  = rsi[1]
+rsiC  = rsi
+rsiH  = rsih
+rsiL  = rsil
+rsiO1 = rsi[2]
+rsiC1 = rsi[1]
+
+prevBodyHi  = math.max(rsiO1, rsiC1)
+prevBodyLo  = math.min(rsiO1, rsiC1)
+prevBodyAbs = math.abs(rsiC1 - rsiO1)
+engBuf      = (engBufPct / 100.0) * prevBodyAbs
+
+bullEngulf = rsiC > rsiO and rsiC1 < rsiO1 and
+             rsiO <= prevBodyLo + engBuf and rsiC >= prevBodyHi - engBuf
+
+bearEngulf = rsiC < rsiO and rsiC1 > rsiO1 and
+             rsiO >= prevBodyHi - engBuf and rsiC <= prevBodyLo + engBuf
+
+rsiBody    = math.abs(rsiC - rsiO)
+upperWickR = rsiH - math.max(rsiO, rsiC)
+lowerWickR = math.min(rsiO, rsiC) - rsiL
+totalWickR = upperWickR + lowerWickR
+wickOk     = rsiBody > 0 and totalWickR < (wickPctEng / 100.0) * rsiBody
+
+rsiSlope    = rsi - rsi[slopeLenEng]
+bullSlopeOk = rsiSlope < 0
+bearSlopeOk = rsiSlope > 0
+
+bullStateOk = state == 2
+bearStateOk = state == 1
+bullPriceOk = requireOppCandle ? close < open : true
+bearPriceOk = requireOppCandle ? close > open : true
+
+bullRaw = bullEngulf and wickOk and bullStateOk and bullSlopeOk and bullPriceOk
+bearRaw = bearEngulf and wickOk and bearStateOk and bearSlopeOk and bearPriceOk
+
+tier1(float bodySize) =>
+    bodySize >= p1_H ? 3 : bodySize >= p1_M ? 2 : 1
+
+tier2_bull(float rsiOpenVal) =>
+    rsiOpenVal <= p2_bull_H ? 3 :
+     rsiOpenVal <= p2_bull_M ? 2 :
+     rsiOpenVal <= p2_bull_L ? 1 : 0
+
+tier2_bear(float rsiOpenVal) =>
+    rsiOpenVal >= p2_bear_H ? 3 :
+     rsiOpenVal >= p2_bear_M ? 2 :
+     rsiOpenVal >= p2_bear_L ? 1 : 0
+
+tier3(float intensity) =>
+    intensity <= p3_H ? 3 : intensity <= p3_M ? 2 : 1
+
+priorRsiHi = ta.highest(rsi, compLen)[1]
+priorRsiLo = ta.lowest(rsi,  compLen)[1]
+
+bullIntensity = priorRsiHi - rsiL
+bearIntensity = rsiH - priorRsiLo
+
+bullT1 = bullRaw ? tier1(rsiBody)         : 0
+bullT2 = bullRaw ? tier2_bull(rsiO)       : 0
+bullT3 = bullRaw ? tier3(bullIntensity)   : 0
+bullGrade = bullRaw and bullT1 > 0 and bullT2 > 0 and bullT3 > 0 ?
+             math.min(bullT1, math.min(bullT2, bullT3)) : 0
+
+bearT1 = bearRaw ? tier1(rsiBody)         : 0
+bearT2 = bearRaw ? tier2_bear(rsiO)       : 0
+bearT3 = bearRaw ? tier3(bearIntensity)   : 0
+bearGrade = bearRaw and bearT1 > 0 and bearT2 > 0 and bearT3 > 0 ?
+             math.min(bearT1, math.min(bearT2, bearT3)) : 0
+
+gradeStr(int g) =>
+    g == 3 ? "H" : g == 2 ? "M" : g == 1 ? "L" : ""
+
+if showEng and bullGrade > 0
+    label.new(
+      x = bar_index,
+      y = rsil - 3,
+      text = gradeStr(bullGrade),
+      color = engColorBull,
+      textcolor = color.black,
+      style = label.style_label_up,
+      size = engLabelSize)
+
+if showEng and bearGrade > 0
+    label.new(
+      x = bar_index,
+      y = rsih + 3,
+      text = gradeStr(bearGrade),
+      color = engColorBear,
+      textcolor = color.black,
+      style = label.style_label_down,
+      size = engLabelSize)
+
+// ═══════════════════════════════════════════════════════════════════
+// CHART BAR COLOR — trend gradient + engulfing flash
+// ═══════════════════════════════════════════════════════════════════
+trendColor =
+  state == 1 and rsi > 50 ? cbullu :
+  state == 1 and rsi < 50 ? cbulld :
+  state == 2 and rsi < 50 ? cbearu :
+  state == 2 and rsi > 50 ? cbeard :
+  color.from_gradient(rsi, ts2, ts1, cbullc, cbearc)
+
+barcolor(
+  showEng and bullGrade > 0 ? engFlashBull :
+  showEng and bearGrade > 0 ? engFlashBear :
+  showbc                    ? trendColor   : na,
+  title="Chart Bar Color", editable=false)

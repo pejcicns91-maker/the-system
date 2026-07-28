@@ -1,0 +1,178 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+// CB12 — THE SCENARIO COPILOT (plain voice; replaces CB11's panel)
+// The AI writes the game plans each morning (see CB12_PROTOCOL.md); this
+// script draws the walls and SPEAKS the plan for the nearest planned zone,
+// switching advice live when a watched price breaks. No jargon on screen.
+// Payload v2 adds per-wall plan fields:
+//   S{n}:{conf},{up|down},{tgt};{altconf},{alttgt},{quit};{brkPx},{brkConf},{brkTgt};{failPx}
+//   N:{one plain sentence of today's nuance}   OVR:{none|EXPANSION|QUIET}
+// ═══════════════════════════════════════════════════════════════════════════
+indicator("CB12 — Scenario Copilot", overlay=true, max_boxes_count=100, max_labels_count=200)
+
+payload  = input.text_area("", "CB12 payload (one line from the morning run)")
+armedIn  = input.int(0, "FORCE ZONE # (0 = auto-nearest planned zone)", minval=0)
+extRight = input.int(60, "zone box extension", minval=10, maxval=400)
+showK    = input.bool(false, "show research constants (off = plain mode)")
+
+var array<box> BXS = array.new<box>()
+var array<label> LBS = array.new<label>()
+f_wipe() =>
+    if array.size(BXS) > 0
+        for i = 0 to array.size(BXS) - 1
+            box.delete(array.get(BXS, i))
+        array.clear(BXS)
+    if array.size(LBS) > 0
+        for i = 0 to array.size(LBS) - 1
+            label.delete(array.get(LBS, i))
+        array.clear(LBS)
+f_val(array<string> parts, string key) =>
+    string out = na
+    for i = 0 to array.size(parts) - 1
+        p = array.get(parts, i)
+        if na(out) and str.startswith(p, key + ":")
+            out := str.substring(p, str.length(key) + 1)
+    out
+f_heat(float c) => c >= 50 ? color.new(#4FB477,55) : c >= 30 ? color.new(#C9A227,60) : c >= 15 ? color.new(#7C8894,70) : color.new(#2A323B,80)
+f_num(string s) => str.tonumber(s)
+
+var table T = table.new(position.top_right, 1, 10, bgcolor=color.new(color.black,15), border_width=1)
+f_row(int r, string s, color c) => table.cell(T, 0, r, s, text_color=c, text_halign=text.align_left, text_size=size.small)
+var table K = table.new(position.bottom_right, 1, 6, bgcolor=color.new(color.black,25), border_width=1)
+
+// day-persistent event memory
+var int   evState = 0        // 0 none · 1 breakout fired · -1 push-failed fired
+var float evPx    = na
+if ta.change(time("D")) != 0
+    evState := 0
+    evPx := na
+
+if barstate.islast
+    f_wipe()
+    table.clear(T, 0, 0, 0, 9)
+    table.clear(K, 0, 0, 0, 5)
+    if not str.startswith(payload, "CB9|") and not str.startswith(payload, "CB12|")
+        f_row(0, "CB12: paste this morning's payload line", color.orange)
+    else
+        parts = str.split(payload, "|")
+        aName = array.get(parts, 1)
+        aDate = array.get(parts, 2)
+        ctx   = f_val(parts, "CTX")
+        nuance = f_val(parts, "N")
+        ovr   = f_val(parts, "OVR")
+        uaS   = f_val(parts, "UA")
+        float uAbs = na(uaS) ? na : str.tonumber(uaS)
+        today = str.format_time(timenow, "yyyy-MM-dd", "America/New_York")
+        stale = aDate != today
+        // regime word, plain
+        mood = str.contains(ctx, "Bear") ? "bearish" : str.contains(ctx, "Bull") ? "bullish" : "choppy"
+        // ── collect walls + their plans ──
+        var array<float> wLo = array.new<float>()
+        var array<float> wHi = array.new<float>()
+        array.clear(wLo)
+        array.clear(wHi)
+        var array<string> wPlan = array.new<string>()
+        array.clear(wPlan)
+        wn = 0
+        for i = 0 to array.size(parts) - 1
+            p = array.get(parts, i)
+            if str.startswith(p, "W") and str.contains(p, ":") and not str.startswith(p, "WC")
+                seg = str.substring(p, str.pos(p, ":") + 1)
+                fld = str.split(seg, ",")
+                if array.size(fld) >= 5
+                    lo = f_num(array.get(fld,0))
+                    hi = f_num(array.get(fld,1))
+                    comp = array.get(fld,2)
+                    cp = f_num(array.get(fld,3))
+                    wn += 1
+                    array.push(wLo, lo)
+                    array.push(wHi, hi)
+                    array.push(wPlan, f_val(parts, "S" + str.tostring(wn)))
+                    hh = hi == lo ? lo*1.0005 : hi
+                    ll = hi == lo ? lo*0.9995 : lo
+                    array.push(BXS, box.new(bar_index-5, hh, bar_index+extRight, ll, bgcolor=f_heat(cp), border_color=comp=="WM" ? color.new(#9C6FD6,30) : color.new(color.gray,45), border_width=comp=="WM"?2:1))
+                    array.push(LBS, label.new(bar_index+extRight, (hh+ll)/2, "zone " + str.tostring(wn), style=label.style_label_left, color=color.new(color.black,70), textcolor=cp>=50?#4FB477:cp>=30?#C9A227:color.gray, size=size.small))
+        // ── pick the active zone: forced, else nearest WITH a plan ──
+        int zi = 0
+        float zGap = 1e18
+        if armedIn > 0 and armedIn <= wn
+            zi := armedIn
+        else
+            for k = 0 to wn - 1
+                if str.length(array.get(wPlan, k)) > 4
+                    lo = array.get(wLo, k)
+                    hi = array.get(wHi, k)
+                    g = close > hi ? close - hi : close < lo ? lo - close : 0.0
+                    if g < zGap
+                        zGap := g
+                        zi := k + 1
+        // ── header ──
+        f_row(0, "CB12 " + aName + (stale ? "  ⚠ YESTERDAY'S PLAN — rerun the morning" : "") + " · market mood: " + mood, stale ? color.orange : color.aqua)
+        if str.length(nuance) > 0
+            f_row(1, "today: " + nuance, #C9A227)
+        if str.contains(ovr, "EXPANSION")
+            f_row(2, "★ BIG-RANGE DAY — zones give way more than usual: favor breakouts, skip fades", #C9A227)
+        if str.contains(ovr, "QUIET")
+            f_row(2, "★ DEAD-QUIET DAY — zones hold more than usual: fades favored, breakouts suspect", #6FA8D6)
+        // ── the plan for the active zone ──
+        if zi == 0
+            f_row(3, "no planned zone in reach — nothing to do yet", color.new(color.silver,25))
+        else
+            lo = array.get(wLo, zi-1)
+            hi = array.get(wHi, zi-1)
+            plan = array.get(wPlan, zi-1)
+            gap = close > hi ? close - hi : close < lo ? lo - close : 0.0
+            inZone = gap == 0.0
+            far = not na(uAbs) and gap > 0.5 * uAbs
+            if str.length(plan) < 5
+                f_row(3, "zone " + str.tostring(zi) + ": no plan written this morning — ask me for one", color.orange)
+            else
+                br = str.split(plan, ";")   // [0] base  [1] alt  [2] breakout  [3] failPx
+                b0 = str.split(array.get(br,0), ",")
+                b1 = str.split(array.get(br,1), ",")
+                b2 = str.split(array.get(br,2), ",")
+                failPx = array.size(br) >= 4 ? f_num(array.get(br,3)) : na
+                conf = array.get(b0,0)
+                dirUp = array.get(b0,1) == "up"
+                tgt  = array.get(b0,2)
+                aConf = array.get(b1,0)
+                aTgt  = array.get(b1,1)
+                aQuit = array.get(b1,2)
+                brkPx = f_num(array.get(b2,0))
+                brkC  = array.get(b2,1)
+                brkT  = array.get(b2,2)
+                // live event detection (day-persistent)
+                if evState == 0 and not na(brkPx)
+                    if (dirUp and close > brkPx) or (not dirUp and close < brkPx)
+                        evState := 1
+                        evPx := brkPx
+                if evState == 0 and not na(failPx)
+                    if (dirUp and close < failPx) or (not dirUp and close > failPx)
+                        evState := -1
+                        evPx := failPx
+                zname = "the " + str.tostring(lo, format.mintick) + "–" + str.tostring(hi, format.mintick) + " zone"
+                if evState == 1
+                    f_row(3, "‼ " + str.tostring(evPx, format.mintick) + " BROKE — real breakout (" + brkC + "% it keeps going)", #E8425A)
+                    f_row(4, (dirUp ? "shorts are dead. If long: hold — take some profit early," : "longs are dead. If short: hold — take some profit early,"), #6FA8D6)
+                    f_row(5, "let the rest run toward " + brkT + ".", #6FA8D6)
+                    f_row(6, "rare failure: price closes back inside the zone → get flat, wait", color.new(color.silver,35))
+                else if evState == -1
+                    f_row(3, "‼ " + str.tostring(evPx, format.mintick) + " GAVE WAY — the push failed here", #E8425A)
+                    f_row(4, (dirUp ? "shorts work now: target " + aTgt : "longs work now: target " + aTgt) + " · quit past " + aQuit, #C9A227)
+                    f_row(5, "the old plan is off until price re-takes the zone", color.new(color.silver,35))
+                else if far
+                    f_row(3, "nearest plan: " + zname + " · price not close yet", color.new(color.silver,25))
+                    f_row(4, "story there: pressure " + (dirUp ? "UP" : "DOWN") + " (" + conf + "%) · watch " + str.tostring(brkPx, format.mintick) + " and " + (na(failPx) ? "-" : str.tostring(failPx, format.mintick)), color.new(color.silver,25))
+                else
+                    f_row(3, (inZone ? "● INSIDE " : "⚡ closing in on ") + zname, color.white)
+                    f_row(4, "MOST LIKELY (" + conf + "%): price pushes " + (dirUp ? "UP" : "DOWN") + " through. " + (dirUp ? "Stay with longs" : "Stay with shorts") + " · first target " + tgt, #4FB477)
+                    f_row(5, "IF it gets slapped back instead (" + aConf + "%): " + (dirUp ? "shorts" : "longs") + " work · target " + aTgt + " · quit past " + aQuit, #C9A227)
+                    f_row(6, (dirUp ? "ABOVE " : "BELOW ") + str.tostring(brkPx, format.mintick) + " = real breakout (" + brkC + "%). Don't fight it · next stop " + brkT, #6FA8D6)
+                    f_row(7, "watch: " + str.tostring(brkPx, format.mintick) + " (breaking out) · " + (na(failPx) ? "-" : str.tostring(failPx, format.mintick)) + " (push failed)", color.white)
+        if showK
+            table.cell(K, 0, 0, "── research constants [era-proof] ──", text_color=color.aqua, text_halign=text.align_left, text_size=size.small)
+            table.cell(K, 0, 1, "LADDER: .3→66 .4→71 .5→76 .6→79 .8→85 1.0→89% through", text_color=color.white, text_halign=text.align_left, text_size=size.small)
+            table.cell(K, 0, 2, "DAY-TYPE: EXPANSION brk 64% (×fast 70%) · QUIET holds 69% (wknd 84%)", text_color=#C9A227, text_halign=text.align_left, text_size=size.small)
+            table.cell(K, 0, 3, "VOTE 3+ reject → 67% · WKND breaks 36% · WORN cap 63%", text_color=color.white, text_halign=text.align_left, text_size=size.small)
+            table.cell(K, 0, 4, "targets: .16U→83% .36U→53% .87U→22% reached", text_color=color.silver, text_halign=text.align_left, text_size=size.small)
+            table.cell(K, 0, 5, "eyes not autopilot · date lists on demand", text_color=color.new(color.red,25), text_halign=text.align_left, text_size=size.small)

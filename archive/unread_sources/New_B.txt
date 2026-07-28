@@ -1,0 +1,611 @@
+//@version=6
+indicator("MTF Volume Story — Swing Plan [B]", "MTF·PLAN", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=50, max_bars_back=1000)
+
+// ============================ INPUTS ============================
+gP = "Profile"
+bins  = input.int(48, "Bins", minval=12, maxval=120, group=gP)
+vaPct = input.float(0.70, "Value area %", minval=0.5, maxval=0.95, step=0.05, group=gP)
+swStr = input.int(10, "Swing strength (L/R bars)", minval=2, maxval=50, group=gP)
+outK  = input.float(3.0, "Outlier clip (×σ)", minval=1.5, maxval=6.0, step=0.5, group=gP)
+
+gL = "Lookback (bars) — swing-tuned"
+lenD  = input.int(60,  "Daily (context)", minval=20, maxval=395, group=gL)
+len4H = input.int(120, "4H (bias)",       minval=20, maxval=395, group=gL)
+len1H = input.int(240, "1H (active)",     minval=20, maxval=395, group=gL)
+len5M = input.int(288, "5m (fine)",       minval=20, maxval=395, group=gL)
+
+gZ = "Structural zones (replaces ATR distance)"
+zoneFrac    = input.float(0.20, "Zone merge width (× 1H value area)", minval=0.05, maxval=1.0, step=0.05, group=gZ, tooltip="Levels within this fraction of the 1H value-area width merge into one zone. This is the structural 'too close' test — no ATR.")
+fallbackPct = input.float(0.40, "…or % of price if VA unavailable", minval=0.05, maxval=3.0, step=0.05, group=gZ)
+mmPct       = input.float(1.50, "Measured-move fallback (% of price)", minval=0.1, maxval=10, step=0.1, group=gZ, tooltip="Used only when no structural target exists AND the 1H value-area width is unavailable.")
+
+gF = "Forecast history (stamped cones)"
+showForecast = input.bool(true, "Draw forecast cones", group=gF)
+fcWidth = input.int(8, "Cone width (bars)", minval=2, maxval=60, group=gF)
+fcKeep  = input.int(40, "Max forecasts kept", minval=1, maxval=200, group=gF)
+colLong = input.color(color.new(color.lime, 0), "Long cone", group=gF)
+colShort= input.color(color.new(color.red, 0), "Short cone", group=gF)
+
+gV = "Trade verdict (graded at entry touch)"
+showVerdict  = input.bool(true, "Grade each plan when price hits its entry (✓/~/✗)", group=gV)
+freshW       = input.int(100, "Freshness window (bars)", minval=10, maxval=500, group=gV, tooltip="At entry-touch, looks back this many bars to see if the level was already tested. Untested ≈ stronger reaction (our data: ~69% fresh vs ~41% tested).")
+freshThr     = input.int(2, "Max prior touches still counted as 'fresh'", minval=0, maxval=20, group=gV)
+volLen       = input.int(14, "Volatility window", minval=2, maxval=100, group=gV)
+volRankLen   = input.int(200, "Volatility percentile window", minval=20, maxval=1000, group=gV)
+volLoThr     = input.float(35, "Low-vol percentile (≤ this = downgrade)", minval=0, maxval=100, group=gV, tooltip="Reaction odds roughly halve in dead tape (our data: ~59% high-vol vs ~30% low-vol).")
+maxPending   = input.int(100, "Max pending plans tracked", minval=5, maxval=300, group=gV)
+keepVerdicts = input.int(60, "Max verdict labels kept", minval=5, maxval=300, group=gV)
+
+gM = "POC migration"
+migLen  = input.int(288, "Bars per period", minval=20, maxval=395, group=gM, tooltip="One 'day' in bars: 288 = 24h crypto on 5m, ~78 = US-stock RTH on 5m")
+migKeep = input.int(10, "Periods tracked", minval=3, maxval=30, group=gM)
+
+gT = "Display"
+tPos = input.string("left", "Table", options=["right","left","top right","top left","bottom right","bottom left"], group=gT)
+
+gMX = "Multi-exchange (crypto, optional)"
+useAgg = input.bool(false, "Use aggregated symbol", group=gMX)
+aggSym = input.string("", "Aggregated symbol", group=gMX)
+
+color cBg = color.new(color.black, 30)
+color cHd = color.new(color.gray, 25)
+
+// ============================ HELPERS ============================
+f_pos(string s) =>
+    s=="left" ? position.middle_left : s=="top right" ? position.top_right : s=="top left" ? position.top_left : s=="bottom right" ? position.bottom_right : s=="bottom left" ? position.bottom_left : position.middle_right
+f_fp(float x) =>
+    na(x) ? "—" : str.tostring(x, format.mintick)
+f_near(float lv, float bnd) =>
+    not na(lv) and not na(bnd) and math.abs(close - lv) <= bnd
+
+// profile -> scalars (POC/VAH/VAL/HVN/LVN), outlier-clipped. Computes EVERY bar (needed for historical forecast backfill).
+f_levels(simple int nb, float vap, simple int len, float kSig) =>
+    int n = len
+    float poc = na
+    float vah = na
+    float val = na
+    float hvn1 = na
+    float lvn1 = na
+    float amin = na
+    float amax = na
+    float sum = 0.0
+    float ssq = 0.0
+    int cnt = 0
+    for k = 0 to n - 1
+        float hk = high[k]
+        float lk = low[k]
+        float ck = close[k]
+        if not na(hk) and not na(lk) and not na(ck)
+            amin := na(amin) ? lk : math.min(amin, lk)
+            amax := na(amax) ? hk : math.max(amax, hk)
+            float src = (hk + lk + ck) / 3.0
+            sum := sum + src
+            ssq := ssq + src * src
+            cnt := cnt + 1
+    if cnt > 0 and not na(amin) and not na(amax) and amax > amin
+        float mean = sum / cnt
+        float vrc = math.max(0.0, ssq / cnt - mean * mean)
+        float sd = math.sqrt(vrc)
+        float loB = math.max(amin, mean - kSig * sd)
+        float hiB = math.min(amax, mean + kSig * sd)
+        if hiB <= loB
+            loB := amin
+            hiB := amax
+        float bs = (hiB - loB) / nb
+        arrV = array.new_float(nb, 0.0)
+        for k = 0 to n - 1
+            float hk = high[k]
+            float lk = low[k]
+            float ck = close[k]
+            float vk = volume[k]
+            if not na(hk) and not na(lk) and not na(ck) and not na(vk)
+                float src = (hk + lk + ck) / 3.0
+                if src >= loB and src <= hiB
+                    int bi = int((src - loB) / bs)
+                    bi := bi < 0 ? 0 : (bi > nb - 1 ? nb - 1 : bi)
+                    array.set(arrV, bi, array.get(arrV, bi) + vk)
+        int pocBin = 0
+        float pocVol = -1.0
+        float tot = 0.0
+        for i = 0 to nb - 1
+            float v = array.get(arrV, i)
+            tot := tot + v
+            if v > pocVol
+                pocVol := v
+                pocBin := i
+        poc := loB + (pocBin + 0.5) * bs
+        float meanV = tot / nb
+        float target = tot * vap
+        float acc = pocVol
+        int lo = pocBin
+        int hi = pocBin
+        while acc < target and (lo > 0 or hi < nb - 1)
+            float loV = lo > 0 ? array.get(arrV, lo - 1) : -1.0
+            float hiV = hi < nb - 1 ? array.get(arrV, hi + 1) : -1.0
+            if hiV >= loV
+                hi := hi + 1
+                acc := acc + (hiV > 0 ? hiV : 0.0)
+            else
+                lo := lo - 1
+                acc := acc + (loV > 0 ? loV : 0.0)
+        vah := loB + (hi + 1) * bs
+        val := loB + lo * bs
+        float h1v = -1.0
+        int   h1b = -1
+        float l1v = 1e18
+        int   l1b = -1
+        for i = 1 to nb - 2
+            float v  = array.get(arrV, i)
+            float vm = array.get(arrV, i - 1)
+            float vp = array.get(arrV, i + 1)
+            if v >= vm and v >= vp and i != pocBin and v > h1v
+                h1v := v
+                h1b := i
+            if v <= vm and v <= vp and v < l1v
+                l1v := v
+                l1b := i
+        hvn1 := h1b >= 0 ? loB + (h1b + 0.5) * bs : na
+        lvn1 := l1b >= 0 ? loB + (l1b + 0.5) * bs : na
+    [poc, vah, val, hvn1, lvn1]
+
+// volume-at-price geometry around current price (for the STRUCTURE read). Computes every bar.
+f_geom(simple int nb, simple int len, float kSig, float hvnM, float lvnM) =>
+    int n = len
+    float hvnUp = na
+    float hvnDn = na
+    float lvnUp = na
+    float lvnDn = na
+    int atCode = 1
+    float amin = na
+    float amax = na
+    float sum = 0.0
+    float ssq = 0.0
+    int cnt = 0
+    for k = 0 to n - 1
+        float hk = high[k]
+        float lk = low[k]
+        float ck = close[k]
+        if not na(hk) and not na(lk) and not na(ck)
+            amin := na(amin) ? lk : math.min(amin, lk)
+            amax := na(amax) ? hk : math.max(amax, hk)
+            float src = (hk + lk + ck) / 3.0
+            sum := sum + src
+            ssq := ssq + src * src
+            cnt := cnt + 1
+    if cnt > 0 and not na(amin) and not na(amax) and amax > amin
+        float mean = sum / cnt
+        float vrc = math.max(0.0, ssq / cnt - mean * mean)
+        float sd = math.sqrt(vrc)
+        float loB = math.max(amin, mean - kSig * sd)
+        float hiB = math.min(amax, mean + kSig * sd)
+        if hiB <= loB
+            loB := amin
+            hiB := amax
+        float bs = (hiB - loB) / nb
+        arrV = array.new_float(nb, 0.0)
+        for k = 0 to n - 1
+            float hk = high[k]
+            float lk = low[k]
+            float ck = close[k]
+            float vk = volume[k]
+            if not na(hk) and not na(lk) and not na(ck) and not na(vk)
+                float src = (hk + lk + ck) / 3.0
+                if src >= loB and src <= hiB
+                    int bi = int((src - loB) / bs)
+                    bi := bi < 0 ? 0 : (bi > nb - 1 ? nb - 1 : bi)
+                    array.set(arrV, bi, array.get(arrV, bi) + vk)
+        float tot = 0.0
+        for i = 0 to nb - 1
+            tot := tot + array.get(arrV, i)
+        float meanV = tot / nb
+        float pr = close
+        int pBin = int((pr - loB) / bs)
+        pBin := pBin < 0 ? 0 : (pBin > nb - 1 ? nb - 1 : pBin)
+        float atVol = array.get(arrV, pBin)
+        atCode := atVol > meanV * hvnM ? 2 : atVol < meanV * lvnM ? 0 : 1
+        for i = 1 to nb - 2
+            float v  = array.get(arrV, i)
+            float vm = array.get(arrV, i - 1)
+            float vp = array.get(arrV, i + 1)
+            float bp = loB + (i + 0.5) * bs
+            bool isMax = v >= vm and v >= vp and v > meanV * hvnM
+            bool isMin = v <= vm and v <= vp and v < meanV * lvnM
+            if isMax
+                if bp > pr
+                    hvnUp := na(hvnUp) ? bp : math.min(hvnUp, bp)
+                if bp < pr
+                    hvnDn := na(hvnDn) ? bp : math.max(hvnDn, bp)
+            if isMin
+                if bp > pr
+                    lvnUp := na(lvnUp) ? bp : math.min(lvnUp, bp)
+                if bp < pr
+                    lvnDn := na(lvnDn) ? bp : math.max(lvnDn, bp)
+    [hvnUp, hvnDn, lvnUp, lvnDn, atCode]
+
+// POC over a fixed lookback (migration sampling), outlier-clipped
+f_pocSimple(simple int lb, simple int nb, float kSig) =>
+    float amin = na
+    float amax = na
+    float sum = 0.0
+    float ssq = 0.0
+    int cnt = 0
+    float poc = na
+    for k = 0 to lb - 1
+        float hk = high[k]
+        float lk = low[k]
+        float ck = close[k]
+        if not na(hk) and not na(lk) and not na(ck)
+            amin := na(amin) ? lk : math.min(amin, lk)
+            amax := na(amax) ? hk : math.max(amax, hk)
+            float src = (hk + lk + ck) / 3.0
+            sum := sum + src
+            ssq := ssq + src * src
+            cnt := cnt + 1
+    if cnt > 0 and not na(amin) and not na(amax) and amax > amin
+        float mean = sum / cnt
+        float vrc = math.max(0.0, ssq / cnt - mean * mean)
+        float sd = math.sqrt(vrc)
+        float loB = math.max(amin, mean - kSig * sd)
+        float hiB = math.min(amax, mean + kSig * sd)
+        if hiB <= loB
+            loB := amin
+            hiB := amax
+        float bs = (hiB - loB) / nb
+        arrV = array.new_float(nb, 0.0)
+        for k = 0 to lb - 1
+            float hk = high[k]
+            float lk = low[k]
+            float ck = close[k]
+            float vk = volume[k]
+            if not na(hk) and not na(lk) and not na(ck) and not na(vk)
+                float src = (hk + lk + ck) / 3.0
+                if src >= loB and src <= hiB
+                    int bi = int((src - loB) / bs)
+                    bi := bi < 0 ? 0 : (bi > nb - 1 ? nb - 1 : bi)
+                    array.set(arrV, bi, array.get(arrV, bi) + vk)
+        int pb = 0
+        float pv = -1.0
+        for i = 0 to nb - 1
+            float v = array.get(arrV, i)
+            if v > pv
+                pv := v
+                pb := i
+        poc := loB + (pb + 0.5) * bs
+    poc
+
+// ============================ COMPUTE LEVELS ============================
+string volSym = useAgg and aggSym != "" ? aggSym : syminfo.tickerid
+[pocD,vahD,valD,hvnD,lvnD]      = request.security(volSym, "D",   f_levels(bins, vaPct, lenD,  outK))
+[poc4H,vah4H,val4H,hvn4H,lvn4H] = request.security(volSym, "240", f_levels(bins, vaPct, len4H, outK))
+[poc1H,vah1H,val1H,hvn1H,lvn1H] = request.security(volSym, "60",  f_levels(bins, vaPct, len1H, outK))
+[poc5M,vah5M,val5M,hvn5M,lvn5M] = request.security(volSym, "5",   f_levels(bins, vaPct, len5M, outK))
+[hvnUp,hvnDn,lvnUp,lvnDn,atCode] = request.security(volSym, "60", f_geom(bins, len1H, outK, 1.4, 0.6))
+
+float price = close
+
+// realized-volatility percentile (no ATR) — used as a verdict modifier
+float vRet  = math.abs(nz(close / close[1] - 1.0, 0.0))
+float vRv   = ta.sma(vRet, volLen)
+float volPct = ta.percentrank(vRv, volRankLen)
+
+// ============================ MIGRATION ============================
+bool newDay = time("D") != time("D")[1]
+var float[] dpoc = array.new_float()
+if newDay and barstate.isconfirmed
+    float p = f_pocSimple(migLen, 24, outK)
+    if not na(p)
+        array.push(dpoc, p)
+        if array.size(dpoc) > migKeep
+            array.shift(dpoc)
+string migDir = "building…"
+if array.size(dpoc) >= 3
+    float first = array.get(dpoc, 0)
+    float last  = array.get(dpoc, array.size(dpoc) - 1)
+    int ups = 0
+    int downs = 0
+    for i = 1 to array.size(dpoc) - 1
+        if array.get(dpoc, i) > array.get(dpoc, i - 1)
+            ups := ups + 1
+        else if array.get(dpoc, i) < array.get(dpoc, i - 1)
+            downs := downs + 1
+    migDir := (ups > downs and last > first) ? "up" : (downs > ups and last < first) ? "down" : "flat"
+
+// ============================ SWING STRUCTURE ============================
+phc = ta.pivothigh(swStr, swStr)
+plc = ta.pivotlow(swStr, swStr)
+var float ph1 = na
+var float ph0 = na
+var float pl1 = na
+var float pl0 = na
+if not na(phc)
+    ph0 := ph1
+    ph1 := phc
+if not na(plc)
+    pl0 := pl1
+    pl1 := plc
+string struc = "mixed"
+if not na(ph1) and not na(ph0) and not na(pl1) and not na(pl0)
+    struc := (ph1 > ph0 and pl1 > pl0) ? "up" : (ph1 < ph0 and pl1 < pl0) ? "down" : "mixed"
+
+// ============================ STATE MACHINE ============================
+var string state   = "Range — fade edges"
+var int    stateBar = bar_index
+if barstate.isconfirmed
+    string ns = state
+    if (migDir == "up" or struc == "up") and not na(poc4H) and price > poc4H
+        ns := "Uptrend — buy dips"
+    else if (migDir == "down" or struc == "down") and not na(poc4H) and price < poc4H
+        ns := "Downtrend — sell rips"
+    else
+        ns := "Range — fade edges"
+    if ns != state
+        state := ns
+        stateBar := bar_index
+
+// ============================ STRUCTURAL ZONES (cluster; ATR-free) ============================
+// LVNs are intentionally excluded — validated as fast/transit zones, not S/R.
+float vaW     = (not na(vah1H) and not na(val1H) and vah1H > val1H) ? (vah1H - val1H) : na
+float zoneGap = not na(vaW) ? vaW * zoneFrac : price * fallbackPct / 100.0
+float mmUnit  = not na(vaW) ? vaW : price * mmPct / 100.0
+
+raw = array.new_float()
+if not na(poc1H)
+    array.push(raw, poc1H)
+if not na(vah1H)
+    array.push(raw, vah1H)
+if not na(val1H)
+    array.push(raw, val1H)
+if not na(hvn1H)
+    array.push(raw, hvn1H)
+if not na(poc4H)
+    array.push(raw, poc4H)
+if not na(vah4H)
+    array.push(raw, vah4H)
+if not na(val4H)
+    array.push(raw, val4H)
+if not na(hvn4H)
+    array.push(raw, hvn4H)
+if not na(poc5M)
+    array.push(raw, poc5M)
+if not na(hvn5M)
+    array.push(raw, hvn5M)
+if not na(pocD)
+    array.push(raw, pocD)
+
+zones = array.new_float()
+if array.size(raw) > 0 and not na(zoneGap) and zoneGap > 0
+    array.sort(raw, order.ascending)
+    float runSum = array.get(raw, 0)
+    int   runCnt = 1
+    float prevv = array.get(raw, 0)
+    if array.size(raw) > 1
+        for i = 1 to array.size(raw) - 1
+            float v = array.get(raw, i)
+            if (v - prevv) <= zoneGap
+                runSum := runSum + v
+                runCnt := runCnt + 1
+            else
+                array.push(zones, runSum / runCnt)
+                runSum := v
+                runCnt := 1
+            prevv := v
+    array.push(zones, runSum / runCnt)
+
+// nearest distinct zones above/below + inside-zone detection
+float res1 = na
+float res2 = na
+float sup1 = na
+float sup2 = na
+bool insideZone = false
+float half = (not na(zoneGap) ? zoneGap : price * 0.002) * 0.5
+if array.size(zones) > 0
+    for i = 0 to array.size(zones) - 1
+        float z = array.get(zones, i)
+        if math.abs(price - z) <= half
+            insideZone := true
+        if z > price + half
+            res1 := na(res1) ? z : math.min(res1, z)
+        if z < price - half
+            sup1 := na(sup1) ? z : math.max(sup1, z)
+    for i = 0 to array.size(zones) - 1
+        float z = array.get(zones, i)
+        if z > price + half and (na(res1) or z > res1)
+            res2 := na(res2) ? z : math.min(res2, z)
+        if z < price - half and (na(sup1) or z < sup1)
+            sup2 := na(sup2) ? z : math.max(sup2, z)
+
+// ============================ SCENARIOS (entry / target / stop) ============================
+float minRange = (not na(zoneGap) ? zoneGap : price * 0.002) * 2.0
+bool hasLong = false
+float eL = na
+float tL = na
+float sL = na
+bool hasShort = false
+float eS = na
+float tS = na
+float sS = na
+
+if state == "Uptrend — buy dips" and not na(sup1)
+    hasLong := true
+    eL := sup1
+    tL := not na(res1) ? res1 : eL + mmUnit
+    sL := not na(sup2) ? sup2 : eL - zoneGap
+else if state == "Downtrend — sell rips" and not na(res1)
+    hasShort := true
+    eS := res1
+    tS := not na(sup1) ? sup1 : eS - mmUnit
+    sS := not na(res2) ? res2 : eS + zoneGap
+else
+    if (not insideZone) and (not na(sup1)) and (not na(res1)) and (res1 - sup1) >= minRange
+        float mid = (sup1 + res1) / 2.0
+        hasLong := true
+        eL := sup1
+        tL := mid
+        sL := sup1 - zoneGap
+        hasShort := true
+        eS := res1
+        tS := mid
+        sS := res1 + zoneGap
+
+// ============================ STRUCTURE READ (volume-at-price) ============================
+bool hUp = not na(hvnUp)
+bool hDn = not na(hvnDn)
+bool lUp = not na(lvnUp)
+bool lDn = not na(lvnDn)
+string sread = "—"
+if atCode == 0 and hUp and hDn
+    sread := "Thin NECK between shelves " + f_fp(hvnDn) + " / " + f_fp(hvnUp) + " — pivot. Expect a move to one shelf; middle is transit, not a target."
+else if atCode == 2 and lUp and lDn
+    sread := "On an acceptance SHELF, thin air both sides (" + f_fp(lvnDn) + " / " + f_fp(lvnUp) + ") — balanced; fast break once it clears either edge."
+else if atCode == 2
+    sread := "On acceptance (HVN) — fair value, two-sided chop. Wait for departure."
+else if atCode == 0
+    sread := "In a thin zone — transitional. Likely picks a shelf: " + (hDn ? f_fp(hvnDn) : "—") + " below / " + (hUp ? f_fp(hvnUp) : "—") + " above."
+else if hUp and hDn
+    sread := "Between shelves " + f_fp(hvnDn) + " (sup) / " + f_fp(hvnUp) + " (res) — rotate; target the opposite shelf."
+else if hUp
+    sread := "HVN above at " + f_fp(hvnUp) + " — magnet/resistance; thin support below."
+else if hDn
+    sread := "HVN below at " + f_fp(hvnDn) + " — support/launchpad." + (lUp ? " Thin above " + f_fp(lvnUp) + " → fast if broken." : "")
+else
+    sread := (lUp ? "Thin above " + f_fp(lvnUp) + " (fast up if broken). " : "") + (lDn ? "Thin below " + f_fp(lvnDn) + " (trapdoor)." : "No clear shelves nearby.")
+
+// ============================ FORECAST CONES + PLAN REGISTRATION ============================
+var string lastKey = na
+var line[] flines = array.new_line()
+var int[]  fcounts = array.new_int()
+// pending-plan tracking (each stamped forecast registered here; resolved when price reaches entry)
+var float[] pgEntry = array.new_float()
+var float[] pgStop  = array.new_float()
+var float[] pgTgt   = array.new_float()
+var int[]   pgDir   = array.new_int()
+var label[] vlabels = array.new_label()
+string fcKey = state + (hasLong ? "L" : "") + (hasShort ? "S" : "")
+
+if barstate.isconfirmed and fcKey != lastKey and (hasLong or hasShort)
+    int b0 = bar_index
+    int b1 = bar_index + fcWidth
+    int made = 0
+    if hasLong and not na(eL) and not na(tL) and not na(sL)
+        if showForecast
+            array.push(flines, line.new(b0, eL, b1, tL, xloc=xloc.bar_index, color=colLong, width=2))
+            array.push(flines, line.new(b0, eL, b1, sL, xloc=xloc.bar_index, color=color.new(colLong, 45), width=1, style=line.style_dashed))
+            made += 2
+        array.push(pgEntry, eL)
+        array.push(pgStop, sL)
+        array.push(pgTgt, tL)
+        array.push(pgDir, 1)
+    if hasShort and not na(eS) and not na(tS) and not na(sS)
+        if showForecast
+            array.push(flines, line.new(b0, eS, b1, tS, xloc=xloc.bar_index, color=colShort, width=2))
+            array.push(flines, line.new(b0, eS, b1, sS, xloc=xloc.bar_index, color=color.new(colShort, 45), width=1, style=line.style_dashed))
+            made += 2
+        array.push(pgEntry, eS)
+        array.push(pgStop, sS)
+        array.push(pgTgt, tS)
+        array.push(pgDir, -1)
+    if made > 0
+        array.push(fcounts, made)
+        while array.size(fcounts) > fcKeep
+            int c = array.shift(fcounts)
+            for _i = 1 to c
+                if array.size(flines) > 0
+                    line.delete(array.shift(flines))
+    lastKey := fcKey
+    while array.size(pgEntry) > maxPending
+        array.shift(pgEntry)
+        array.shift(pgStop)
+        array.shift(pgTgt)
+        array.shift(pgDir)
+
+// ============================ PLAN VERDICTS (graded at entry touch) ============================
+bool vTake = false
+bool vMarg = false
+bool vSkip = false
+if showVerdict and barstate.isconfirmed and array.size(pgEntry) > 0
+    int idx = array.size(pgEntry) - 1
+    while idx >= 0
+        float pe = array.get(pgEntry, idx)
+        float ps = array.get(pgStop, idx)
+        float pt = array.get(pgTgt, idx)
+        int   pd = array.get(pgDir, idx)
+        bool touched = pd == 1 ? (low <= pe) : (high >= pe)
+        if touched
+            int ptouch = 0
+            for j = 1 to freshW
+                float lj = low[j]
+                float hj = high[j]
+                if not na(lj) and not na(hj) and lj <= pe + half and hj >= pe - half
+                    ptouch := ptouch + 1
+            bool fresh = ptouch <= freshThr
+            bool lowVol = not na(volPct) and volPct < volLoThr
+            bool opp = pd == 1 ? (state == "Downtrend — sell rips") : (state == "Uptrend — buy dips")
+            bool aligned = pd == 1 ? hasLong : hasShort
+            string tier = opp ? "SKIP" : (fresh and not lowVol) ? "TAKE" : "MARGINAL"
+            color vc = tier == "TAKE" ? color.lime : tier == "SKIP" ? color.red : color.orange
+            string mk = tier == "TAKE" ? "✓" : tier == "SKIP" ? "✗" : "~"
+            string why = (fresh ? "fresh" : "tested") + " · " + (lowVol ? "vol lo" : "vol ok") + " · " + (opp ? "bias opp" : aligned ? "bias aligned" : "range")
+            label lb = label.new(bar_index, pe, mk, xloc=xloc.bar_index, yloc=yloc.price, style=pd == 1 ? label.style_label_up : label.style_label_down, color=color.new(vc, 15), textcolor=color.white, size=size.small, tooltip=(pd == 1 ? "LONG" : "SHORT") + " entry " + f_fp(pe) + " → tgt " + f_fp(pt) + " · stop " + f_fp(ps) + "\nverdict: " + tier + "  (" + why + ")")
+            array.push(vlabels, lb)
+            if tier == "TAKE"
+                vTake := true
+            else if tier == "SKIP"
+                vSkip := true
+            else
+                vMarg := true
+            while array.size(vlabels) > keepVerdicts
+                label.delete(array.shift(vlabels))
+            array.remove(pgEntry, idx)
+            array.remove(pgStop, idx)
+            array.remove(pgTgt, idx)
+            array.remove(pgDir, idx)
+        idx := idx - 1
+alertcondition(vTake, "Entry valid (Take)", "MTF Plan: price reached a pending entry — read still supports it")
+alertcondition(vMarg, "Entry marginal", "MTF Plan: price reached a pending entry — downgraded (tested / low-vol / range)")
+alertcondition(vSkip, "Entry vetoed (Skip)", "MTF Plan: price reached a pending entry — bias flipped opposite")
+
+// ============================ ALERTS ============================
+float band = (not na(zoneGap) ? zoneGap : price * 0.002) * 0.5
+bool inZone = (hasLong and f_near(eL, band)) or (hasShort and f_near(eS, band))
+bool zoneEnter = inZone and not inZone[1]
+bool biasChg = state != state[1]
+alertcondition(zoneEnter, "Entry zone reached", "MTF Plan: price reached a structural entry zone")
+alertcondition(biasChg, "Bias change", "MTF Plan: swing bias changed")
+
+// ============================ TABLE ============================
+string ifThen = ""
+if state == "Uptrend — buy dips"
+    ifThen := "IF accept below " + f_fp(na(sup2) ? sup1 : sup2) + " → flips DOWN (→ " + f_fp(val4H) + ")"
+else if state == "Downtrend — sell rips"
+    ifThen := "IF accept above " + f_fp(na(res2) ? res1 : res2) + " → flips UP (→ " + f_fp(vah4H) + ")"
+else
+    ifThen := "IF accept > " + f_fp(res1) + " → up-break (→ " + f_fp(res2) + "); < " + f_fp(sup1) + " → down-break (→ " + f_fp(sup2) + ")"
+
+var table T = table.new(f_pos(tPos), 2, 10, border_width=1, frame_width=1, frame_color=color.new(color.gray,40))
+if barstate.islast
+    color biasC = state == "Uptrend — buy dips" ? color.lime : state == "Downtrend — sell rips" ? color.red : color.silver
+    string ctx = na(pocD) ? "—" : (price > pocD ? "above Daily POC " + f_fp(pocD) : "below Daily POC " + f_fp(pocD))
+    string longRow  = hasLong  ? "entry " + f_fp(eL) + " → tgt " + f_fp(tL) + " · stop " + f_fp(sL) : "—"
+    string shortRow = hasShort ? "entry " + f_fp(eS) + " → tgt " + f_fp(tS) + " · stop " + f_fp(sS) : "—"
+    string noteRow  = (not hasLong and not hasShort) ? (insideZone ? "inside one zone — no two-sided trade; wait for departure" : "no clean structural edges — stand aside") : "wait for price to reach a marked entry"
+    string zoneRow  = "sup " + f_fp(sup1) + " · res " + f_fp(res1) + "  (gap " + f_fp(zoneGap) + ")"
+    table.cell(T,0,0,"BIAS",      text_color=color.white,  bgcolor=cHd, text_size=size.small, text_halign=text.align_left)
+    table.cell(T,1,0,state,       text_color=biasC,        bgcolor=cHd, text_size=size.small, text_halign=text.align_left)
+    table.cell(T,0,1,"STRUCTURE", text_color=color.white,  bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(T,1,1,sread,       text_color=color.aqua,   bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(T,0,2,"LONG",      text_color=color.white,  bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(T,1,2,longRow,     text_color=color.lime,   bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(T,0,3,"SHORT",     text_color=color.white,  bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(T,1,3,shortRow,    text_color=#ff6b6b,      bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(T,0,4,"NOTE",      text_color=color.gray,   bgcolor=cBg, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(T,1,4,noteRow,     text_color=color.yellow, bgcolor=cBg, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(T,0,5,"IF / THEN", text_color=color.white,  bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(T,1,5,ifThen,      text_color=color.fuchsia,bgcolor=cBg, text_size=size.small, text_halign=text.align_left)
+    table.cell(T,0,6,"zones",     text_color=color.gray,   bgcolor=cBg, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(T,1,6,zoneRow,     text_color=color.silver, bgcolor=cBg, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(T,0,7,"value mig", text_color=color.gray,   bgcolor=cBg, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(T,1,7,migDir + " · struct " + struc, text_color=color.silver, bgcolor=cBg, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(T,0,8,"held",      text_color=color.gray,   bgcolor=cBg, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(T,1,8,str.tostring(bar_index - stateBar) + " bars", text_color=color.silver, bgcolor=cBg, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(T,0,9,"context",   text_color=color.gray,   bgcolor=cBg, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(T,1,9,ctx,         text_color=color.silver, bgcolor=cBg, text_size=size.tiny, text_halign=text.align_left)
