@@ -1,0 +1,30 @@
+name: Run job
+on:
+  workflow_dispatch:
+    inputs:
+      script: {description: "job file under jobs/ (e.g. smoke.py)", default: "smoke.py"}
+      budget_minutes: {description: "minutes this run", default: "230"}
+      args: {description: "extra args", default: ""}
+permissions: {contents: write}
+concurrency:
+  group: "job-${{ github.event.inputs.script }}"
+  cancel-in-progress: false
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -q "pandas==3.0.2" numpy pyarrow scipy scikit-learn requests
+      - name: run job
+        run: python jobs/${{ github.event.inputs.script }} --budget-min ${{ github.event.inputs.budget_minutes }} ${{ github.event.inputs.args }}
+      - name: commit results
+        if: always()
+        run: |
+          git config user.name "job-bot"; git config user.email "bot@none"
+          git add -A results 2>/dev/null || true
+          git commit -m "job chunk: ${{ github.event.inputs.script }} [skip ci]" || echo "nothing to commit"
+          git pull --rebase || true
+          git push || true
