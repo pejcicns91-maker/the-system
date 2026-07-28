@@ -19,6 +19,7 @@ jobs:
         with: {python-version: "3.12"}
       - run: pip install -q "pandas==3.0.2" numpy pyarrow scipy scikit-learn requests
       - name: run job
+        env: {GH_TOKEN: "${{ github.token }}"}
         run: python jobs/${{ github.event.inputs.script }} --budget-min ${{ github.event.inputs.budget_minutes }} ${{ github.event.inputs.args }}
       - name: commit results
         if: always()
