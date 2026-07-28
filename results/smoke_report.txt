@@ -1,0 +1,9 @@
+PASS raw BTC 5m bars: 509,720 (expected 509,720)
+PASS raw ETH 5m bars: 509,720 (expected 509,720)
+PASS raw SOL 5m bars: 509,720 (expected 509,720)
+PASS raw XRP 5m bars: 509,720 (expected 509,720)
+PASS M1_state level-days: 135,360 (expected 135,360)
+PASS vantage rows: 585,176 (expected 585,176)
+PASS level_events: 64,291 (expected 64,291)
+PASS battery trades: 186,208 (expected 186,208)
+verdict: ALL PASS
