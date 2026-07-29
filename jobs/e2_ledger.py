@@ -1,310 +1,251 @@
 #!/usr/bin/env python3
-"""e3_bc.py — B/C MACHINERY vs EPISODE OUTCOMES, UNADJUSTED (Svet's signed design; his explicit
-word runs the PRE-RULING vectors: ATRp-denominated trade outcomes O6-O8 as originally pitched.
-Ruling 1 — primaries structural/pips/percent, ATR-family+U as additional measures only — remains
-binding law for future tables and is not repealed by this run; it is simply not applied here.)
-
-PART 1 — anchor_outcomes_{COIN}.parquet: one row per anchor (keyed identically), TEN weight
-vectors, NaN = out of universe (the third outcome and 'neither' never become coin flips):
- o1_closed_beyond (all) · o2_traded_beyond (all) · o3_bounce_corridor: bounce_ext reached the
- bounce-side corridor mark before any close-beyond; 0 when no pre-break bounce window existed;
- na when that corridor side is missing · o4_retest_given_break (universe: o1==1) ·
- o5_held_given_retest (universe: retested; 1 = no reclaim close by window end) ·
- o6_fade_atrp_100_025, o7_fade_atrp_100_050, o8_rt_atrp_100_050, o9_rt_struct_100_050:
- ledger-grain trade wins (win=1 loss=0; ambiguous/neither/entry-bar = NaN; ATRp = PRIOR-day
- ATR14; STRUCT = corridor gaps) · o10_closeback (legacy vector riding beside).
-PART 2 — B singles x10: the b2_offsets loops mirrored EXACTLY (same anchors, same pos =
- last completed bar before touch, same bins, same comps, same shape trio, same daily join),
- scored per outcome -> bprof_offsets / bprof_day / bprof_shape (long: outcome in the key;
- n = finite count in cell, s = sum).
-PART 3 — C1 x10: the shipped per-anchor dial matrices (results/layerc/dials_{COIN}) re-used
- after an alignment gate (dials.cb must equal anchors.closeback row-wise), pairs + triples,
- floor n>=50 per outcome row (floor declared, matrices raw so nothing is lost).
-GATES (any FAIL = exit 1): vector universes reconcile (o1 n == anchors; o4 universe == broke;
- o5 universe == retested; o10 mean == anchors closeback); if results/ledger/ledger_cells.parquet
- is present, o6-o9 decided n and win sums must MATCH the shipped ledger cells exactly
- (family ALL, both sides summed) — absent ledger = named skip, not silence.
-Ships -> results/bcep/. Deterministic, no RNG. Counts only; verdicts are Svet's."""
-import pandas as pd, numpy as np, json, os, sys, time, argparse
-from itertools import combinations
+"""e2_ledger.py — THE LEDGER QUESTION from the shipped episode tables (Svet's order, 2026-07-28).
+Sequenced stop x target table from episode_exc: per level family (PD/ON/PS/PW/PM) x approach
+side x entry basis (fade-at-touch, retest-entry) x coin. WIN = favorable excursion reaches the
+target STRICTLY BEFORE adverse reaches the stop, read off the excursion staircases; equal
+timestamps = the same 5m bar = AMBIGUOUS, a counted third outcome, never guessed; neither
+reached by window end = NEITHER, counted. Grids swept under TWO EX-ANTE RULERS:
+ ATR-prior = the PRIOR day's ATR14 (the stored atr14_1d includes the current day's range —
+   a lookahead as a stop denominator — so the ruler is shift(1), derived at query time,
+   deviation from the stored column NAMED; record untouched);
+ STRUCTURAL = the corridor (the level grid as its own ruler, ex-ante at entry): stop as a
+   fraction of the gap behind the position, target as a fraction of the gap ahead; 1.0 = the
+   corridor mark itself.
+COSTS: round-trip tolls attached as parameters at 13.5bp (the program's historical taker toll)
+and 4.5bp (spot-maker ~ 1/3 FTMO friction, per PACK3) — per-episode cost in R = toll*price/stop,
+averaged over decided; EV per decided trade in R = (sum R_win - n_loss)/n_dec - mean_cost_R.
+Ambiguous and neither are EXCLUDED from EV and shown beside it. n on every cell; no floors,
+no pruning; file sorted n_dec descending. Cross-coin consistency on pooled rows = how many of
+the 4 coins share the pooled EV sign at each toll. Trade language legal under v1.1: computed
+from EPISODE grain, entry/stop/target and their ORDER measured.
+Ships -> results/ledger/: ledger_cells.parquet + LEDGER.md. Also (runner only) appends
+contract v1.2 QUESTION LEDGER + writes docs/newproject/QUESTION_LEDGER.md — Svet's order;
+running this job is the signature. Deterministic, no RNG. Counts only; verdicts are Svet's."""
+import pandas as pd, numpy as np, json, os, sys, time, argparse, hashlib, subprocess
 
 ap = argparse.ArgumentParser(); ap.add_argument('--budget-min', type=float, default=230)
 A_, _ = ap.parse_known_args(); T0 = time.time()
 COINS = ['BTC','ETH','SOL','XRP']
-REC, EPD, LB, LC, OUT = 'results/record','results/episodes','results/layerb','results/layerc','results/bcep'
-os.makedirs(OUT, exist_ok=True); os.makedirs('results/state', exist_ok=True)
-SF = 'results/state/e3.json'
-st = json.load(open(SF)) if os.path.exists(SF) else {'done': [], 'c1done': [], 'uni': {}}
-K = 100; INF = np.int64(2**62)
-OCOLS = ['o1_closed_beyond','o2_traded_beyond','o3_bounce_corridor','o4_retest_given_break',
-         'o5_held_given_retest','o6_fade_atrp_100_025','o7_fade_atrp_100_050',
-         'o8_rt_atrp_100_050','o9_rt_struct_100_050','o10_closeback']
-BINS = {'rsi':[0,30,40,50,60,70,101],'rng_x':[0,0.7,1.0,1.5,1e9],'close_pos':[-0.01,0.33,0.66,1.01],
-        'body_frac':[-0.01,0.33,0.66,1.01],'volr':[0,0.8,1.2,1e9],'relvol':[0,0.7,1.5,3,1e9]}
-def binify(name, v):
-    if name in BINS:
-        e = BINS[name]; b = np.digitize(v, e) - 1
-        lab = np.array([f"{e[i]}-{e[i+1]}" for i in range(len(e)-1)] + ['na'])
-        b = np.where(np.isfinite(v), np.clip(b, 0, len(e)-2), len(e)-1); return lab[b]
-    return v.astype(str)
+EPD, OUT = 'results/episodes', 'results/ledger'
+os.makedirs(OUT, exist_ok=True)
+INF = np.int64(2**62)
+SK_ATR = [0.10,0.20,0.30,0.50,0.75,1.00]; TK_ATR = [0.25,0.50,0.75,1.00,1.50,2.00]
+SK_ST  = [0.25,0.50,0.75,1.00];           TK_ST  = [0.25,0.50,0.75,1.00]
+GEOMS = [('ATRp', a, b) for a in SK_ATR for b in TK_ATR] + [('STRUCT', a, b) for a in SK_ST for b in TK_ST]
+NG_ATR, NG_ST = len(SK_ATR)*len(TK_ATR), len(SK_ST)*len(TK_ST)
+TOLL_HI, TOLL_LO = 0.00135, 0.00045
 
-# ---------------------------------------------------------------- PART 1: vectors
-def build_vectors(coin):
-    E = pd.read_parquet(f'{EPD}/episodes_{coin}.parquet', columns=['wdate','mark','price','t0',
-        'corridor_up_price','corridor_dn_price','first_trade_beyond_at','first_close_beyond_at',
-        'bounce_ext_price','retest_touch_at','reclaim_close_at'])
-    A = pd.read_parquet(f'{LB}/anchors_{coin}.parquet',
-        columns=['wdate','mark','price','t0','open_side','closeback'])
-    D = pd.read_parquet(f'{REC}/bars_{coin}_1D.parquet', columns=['wdate','atr14_1d'])
-    D['wdate'] = D.wdate.astype(str); D = D.sort_values('wdate'); D['atrp'] = D.atr14_1d.shift(1)
-    M = E.merge(A, on=['wdate','mark','price','t0'], validate='1:1').merge(
-        D[['wdate','atrp']], on='wdate', how='left')
-    M['o1_closed_beyond'] = M.first_close_beyond_at.notna().astype(float)
-    M['o2_traded_beyond'] = M.first_trade_beyond_at.notna().astype(float)
-    ahead = np.where(M.open_side == 1, M.corridor_up_price, M.corridor_dn_price)
-    reach = np.where(M.open_side == 1, M.bounce_ext_price >= ahead, M.bounce_ext_price <= ahead)
-    M['o3_bounce_corridor'] = np.where(np.isfinite(ahead),
-        np.where(M.bounce_ext_price.notna(), reach.astype(float), 0.0), np.nan)
-    M['o4_retest_given_break'] = np.where(M.o1_closed_beyond == 1,
-        M.retest_touch_at.notna().astype(float), np.nan)
-    M['o5_held_given_retest'] = np.where(M.retest_touch_at.notna(),
-        M.reclaim_close_at.isna().astype(float), np.nan)
-    M['o10_closeback'] = M.closeback.astype(float)
-    for c in ['o6_fade_atrp_100_025','o7_fade_atrp_100_050','o8_rt_atrp_100_050','o9_rt_struct_100_050']:
-        M[c] = np.nan
-    X = pd.read_parquet(f'{EPD}/episode_exc_{coin}.parquet').sort_values(
-        ['wdate','mark','t0','basis','side','seq'])
-    meta = M.set_index(['wdate','mark','t0'])
-    o6 = {}; o7 = {}; o8 = {}; o9 = {}
-    for (wd, mk, t0v, basis), g in X.groupby(['wdate','mark','t0','basis'], sort=False):
-        r = meta.loc[(wd, mk, t0v)]
-        m = float(r.price); osd = int(r.open_side); d = osd if basis == 'fade' else -osd
-        fv = g[g.side == 'fav']; av = g[g.side == 'adv']
-        fex = d*(fv.px.to_numpy() - m); fat = fv['at'].values.astype('datetime64[ns]').astype(np.int64)
-        aex = -d*(av.px.to_numpy() - m); aat = av['at'].values.astype('datetime64[ns]').astype(np.int64)
-        e0 = fat[0]
-        def res(s_thr, t_thr):
-            i = int(np.searchsorted(aex, s_thr)); j = int(np.searchsorted(fex, t_thr))
-            ts = aat[i] if i < len(aat) else INF; tt = fat[j] if j < len(fat) else INF
-            first = min(ts, tt)
-            if first == INF or first == e0 or ts == tt: return np.nan
-            return 1.0 if tt < ts else 0.0
-        atr = float(r.atrp) if pd.notna(r.atrp) else np.nan
-        if basis == 'fade':
-            if np.isfinite(atr):
-                o6[(wd, mk, t0v)] = res(1.00*atr, 0.25*atr)
-                o7[(wd, mk, t0v)] = res(1.00*atr, 0.50*atr)
+CONTRACT = 'docs/newproject/PHASE_CONTRACT_v1.md'
+V11_SHA = '2bd4318705e72bdade59377a95f5de183a1bfc18c695f3a3d00a5ca26b97ba54'
+V12_APPEND = """
+## v1.2 — QUESTION LEDGER (Svet's order in chat, 2026-07-28; running e2_ledger.py = the signature)
+Svet's destination questions are tracked in docs/newproject/QUESTION_LEDGER.md with status
+ANSWERED / PARTIAL / NOT-YET. Every shipment's report carries the ledger block with statuses
+as of that shipment; statuses are proposed by shipments and stand only until Svet's word.
+A shipment that advances no ledger question says so. Adding a question = Svet's word, one line.
+"""
+LEDGER_MD = """# QUESTION LEDGER — Svet's destination questions (v1.2 law; statuses as of 2026-07-28 e2 shipment)
+L1 The stop x target x situation ledger: which geometries, in which situations, clear costs —
+   sequenced from episode grain. — PARTIAL: family x side x basis situations ANSWERED under the
+   ATR-prior and corridor rulers at the swept grids, costs at 13.5/4.5bp (results/ledger/);
+   component-conditioned situations await the B/C episode re-run.
+L2 C2's tie: unconditionable market vs too-blunt outcome. — NOT-YET (decided by B/C vs episode outcomes).
+L3 Trend-day vs range-day: which day-label candidate earns the name, and the two conditionals
+   (sweep-and-reverse | range-day; pullback-continuation | trend-day). — PARTIAL (daychar tables
+   shipped per candidate under three rulers; verdict open).
+L4 Do component readings — alone, at offsets, paired — condition episode outcomes? — NOT-YET.
+L5 The Daily Analyst: morning packet -> levels, scenarios, odds. — NOT-YET (the destination).
+Note on the old verdict "geometry isn't there": L1 is its re-trial at swept parameters under two
+ex-ante rulers at episode grain; the frozen 0.6U stop is one point inside these grids, not a law.
+"""
+
+def docs_step():
+    if not os.environ.get('GITHUB_ACTIONS'):
+        print('local run: contract v1.2 + ledger doc not written (runner only).'); return
+    cur = open(CONTRACT,'rb').read()
+    if hashlib.sha256(cur).hexdigest() != V11_SHA:
+        if V12_APPEND.strip() in cur.decode('utf-8'):
+            print('contract already at v1.2; ledger doc refresh only.')
         else:
-            if np.isfinite(atr):
-                o8[(wd, mk, t0v)] = res(1.00*atr, 0.50*atr)
-            cu, cd = r.corridor_up_price, r.corridor_dn_price
-            ah = (cu - m) if d == 1 else (m - cd); bh = (m - cd) if d == 1 else (cu - m)
-            if pd.notna(ah) and pd.notna(bh):
-                o9[(wd, mk, t0v)] = res(1.00*float(bh), 0.50*float(ah))
-    keys = list(zip(M.wdate, M['mark'], M.t0))
-    M['o6_fade_atrp_100_025'] = [o6.get(k, np.nan) for k in keys]
-    M['o7_fade_atrp_100_050'] = [o7.get(k, np.nan) for k in keys]
-    M['o8_rt_atrp_100_050']   = [o8.get(k, np.nan) for k in keys]
-    M['o9_rt_struct_100_050'] = [o9.get(k, np.nan) for k in keys]
-    V = M[['wdate','mark','price','t0'] + OCOLS].copy(); V.insert(0, 'coin', coin)
-    V.to_parquet(f'{OUT}/anchor_outcomes_{coin}.parquet', compression='zstd', index=False)
-    ok = (len(V) == len(A)
-          and int(V.o4_retest_given_break.notna().sum()) == int(V.o1_closed_beyond.sum())
-          and int(V.o5_held_given_retest.notna().sum()) == int(np.nansum(V.o4_retest_given_break))
-          and abs(float(V.o10_closeback.mean()) - float(A.closeback.mean())) < 1e-12)
-    led = 'results/ledger/ledger_cells.parquet'
-    gl = 'ledger gate: SKIPPED (results/ledger absent — named, not silent)'
-    if os.path.exists(led):
-        L = pd.read_parquet(led)
-        def cell(basis, ruler, sk, tk):
-            c = L[(L.coin == coin) & (L.family == 'ALL') & (L.basis == basis) &
-                  (L.ruler == ruler) & (L.stop_k == sk) & (L.tgt_k == tk)]
-            return int(c.n_dec.sum()), int(c.n_win.sum())
-        chk = [('o6_fade_atrp_100_025', cell('fade','ATRp',1.00,0.25)),
-               ('o7_fade_atrp_100_050', cell('fade','ATRp',1.00,0.50)),
-               ('o8_rt_atrp_100_050',   cell('rt','ATRp',1.00,0.50)),
-               ('o9_rt_struct_100_050', cell('rt','STRUCT',1.00,0.50))]
-        bad = [(c, int(V[c].notna().sum()), int(np.nansum(V[c])), nd, nw)
-               for c, (nd, nw) in chk
-               if int(V[c].notna().sum()) != nd or int(np.nansum(V[c])) != nw]
-        gl = 'ledger gate: PASS (o6-o9 decided n and wins match shipped ledger exactly)' if not bad \
-             else f'ledger gate: FAIL {bad}'
-        ok = ok and not bad
-    uni = {c: [int(V[c].notna().sum()), float(np.nanmean(V[c]))] for c in OCOLS}
-    print(f'{coin} vectors: {len(V):,} rows · ' + gl)
-    return V, uni, ok
+            print('CONTRACT DRIFT: bytes are neither v1.1 nor v1.2 — never overwritten. STOP.'); sys.exit(1)
+    else:
+        open(CONTRACT,'ab').write(V12_APPEND.encode()); print('contract appended -> v1.2')
+    open('docs/newproject/QUESTION_LEDGER.md','w').write(LEDGER_MD)
+    try:
+        subprocess.run(['git','config','user.name','job-bot'], check=True)
+        subprocess.run(['git','config','user.email','bot@none'], check=True)
+        subprocess.run(['git','add', CONTRACT, 'docs/newproject/QUESTION_LEDGER.md'], check=True)
+        subprocess.run(['git','commit','-m','docs: contract v1.2 QUESTION LEDGER (Svet order 2026-07-28) [skip ci]'], check=True)
+        subprocess.run(['git','push'], check=True)
+        print('DOCS COMMITTED: contract v1.2 + QUESTION_LEDGER.md')
+    except subprocess.CalledProcessError as e:
+        print(f'DOCS COMMIT FAILED ({e}) — named, not silent; ledger build continues.')
 
-# ---------------------------------------------------------------- PART 2: B mirror x10
-def profile_cells(off_flat, lab_codes, labels, valid_ok, OMAT_rep, coin, tf, comp):
-    rows = []
-    nl = len(labels); gid = off_flat*nl + lab_codes
-    for oi, oc in enumerate(OCOLS):
-        ov = OMAT_rep[:, oi]
-        msk = valid_ok & np.isfinite(ov)
-        if not msk.any(): continue
-        cnt = np.bincount(gid[msk], minlength=K*nl)
-        s = np.bincount(gid[msk], weights=ov[msk], minlength=K*nl)
-        nz = np.flatnonzero(cnt)
-        for z in nz:
-            off, li = divmod(int(z), nl)
-            if labels[li] == 'na': continue
-            rows.append((coin, tf, comp, off, labels[li], oc, int(cnt[z]), float(s[z])))
-    return rows
+def fam(mk): return mk[:2]
 
-def build_b(coin, V):
-    AN = pd.read_parquet(f'{LB}/anchors_{coin}.parquet')
-    OMAT = AN.merge(V, on=['wdate','mark','price','t0'], validate='1:1')[OCOLS].to_numpy(float)
-    assert OMAT.shape[0] == len(AN)
-    t0 = pd.to_datetime(AN.t0, utc=True).to_numpy()
-    N = len(AN); offs = np.arange(K)
-    OMAT_rep = np.repeat(OMAT, K, axis=0)
-    off_flat = np.broadcast_to(offs, (N, K)).ravel()
-    POf, PSh, PDy = [], [], []
-    frames = {'5m': pd.read_parquet(f'{REC}/bars_{coin}_5m.parquet'),
-              '15m': pd.read_parquet(f'{REC}/bars_{coin}_15m.parquet'),
-              '1h': pd.read_parquet(f'{REC}/bars_{coin}_1h.parquet'),
-              '4h': pd.read_parquet(f'{REC}/bars_{coin}_4h.parquet')}
-    for tfk, fr in frames.items():
-        fr = fr.copy(); fr['dt'] = pd.to_datetime(fr.dt, utc=True); dta = fr.dt.to_numpy()
-        pos = np.searchsorted(dta, t0, 'right') - 2
-        comps = [c for c in ['hy_state','rsi','rng_x','close_pos','body_frac','hl_tok','volr',
-                             'relvol','div_bull','div_bear','session'] if c in fr.columns]
-        if tfk == '4h' and 'btc_state' in fr.columns: comps.append('btc_state')
-        IDX = pos[:, None] - offs[None, :]
-        valid = (IDX >= 0).ravel(); IDXc = np.clip(IDX, 0, len(fr)-1)
-        for cname in comps:
-            Vv = fr[cname].to_numpy()[IDXc]
-            if Vv.dtype != object and Vv.dtype != bool: Vb = binify(cname, Vv.astype(float))
-            else: Vb = Vv.astype(str)
-            flat = Vb.ravel()
-            codes, labels = pd.factorize(flat)
-            ok = valid & (flat != 'na')
-            POf += profile_cells(off_flat, codes, list(labels), ok, OMAT_rep, coin, tfk, cname)
-        if 'hy_state' in fr.columns:
-            stt = fr['hy_state'].to_numpy(); flips = np.concatenate([[0], (stt[1:] != stt[:-1]).astype(int)])
-            cf = np.cumsum(flips)
-            cb_ = np.cumsum(fr['div_bull'].to_numpy().astype(int)) if 'div_bull' in fr.columns else np.zeros(len(fr), int)
-            cs_ = np.cumsum(fr['div_bear'].to_numpy().astype(int)) if 'div_bear' in fr.columns else np.zeros(len(fr), int)
-            sl = np.sign(np.nan_to_num(fr['hy_rsi_slope'].to_numpy())) if 'hy_rsi_slope' in fr.columns else np.zeros(len(fr))
-            run = np.zeros(len(fr), int)
-            for i in range(1, len(fr)):
-                run[i] = run[i-1] + 1 if (sl[i] == sl[i-1] and sl[i] != 0) else (1 if sl[i] != 0 else 0)
-            p0 = np.clip(pos, 0, len(fr)-1); pK = np.clip(pos-K, 0, len(fr)-1)
-            sh = pd.DataFrame({'flips100': cf[p0]-cf[pK], 'divb100': cb_[p0]-cb_[pK],
-                               'divs100': cs_[p0]-cs_[pK], 'bars_in': fr['hy_bars_in'].to_numpy()[p0],
-                               'slope_run': run[p0]})
-            for cname, edges in [('flips100',[0,3,6,10,1e9]),('divb100',[0,2,5,1e9]),
-                                 ('divs100',[0,2,5,1e9]),('bars_in',[0,6,20,50,1e9]),('slope_run',[0,3,6,1e9])]:
-                b = np.digitize(sh[cname], edges) - 1
-                lab = [f"{edges[i]}-{edges[i+1]}" for i in range(len(edges)-1)]
-                sb = np.array(lab)[np.clip(b, 0, len(lab)-1)]
-                df = pd.DataFrame(OMAT, columns=OCOLS).assign(bin=sb)
-                g = df.groupby('bin').agg(['count','sum'])
-                for oc in OCOLS:
-                    for binv, row in g[oc].iterrows():
-                        if row['count'] > 0:
-                            PSh.append((coin, tfk, cname, binv, oc, int(row['count']), float(row['sum'])))
-    D = pd.read_parquet(f'{REC}/bars_{coin}_1D.parquet')
-    Dk = D.assign(w=D.wdate.astype(str)).set_index('w')
-    j = AN.join(Dk[['pi_state','hayden_daily_anchor','d5_dtype','lean_dir','yd_arch','ob55_open','d6_ob55_fired']], on='wdate')
-    for cname in ['pi_state','hayden_daily_anchor','d5_dtype','lean_dir','yd_arch','ob55_open','d6_ob55_fired']:
-        df = pd.DataFrame(OMAT, columns=OCOLS).assign(bin=j[cname].astype(str).to_numpy())
-        g = df.groupby('bin').agg(['count','sum'])
-        for oc in OCOLS:
-            for binv, row in g[oc].iterrows():
-                if row['count'] > 0:
-                    PDy.append((coin, cname, binv, oc, int(row['count']), float(row['sum'])))
-    return POf, PSh, PDy
-
-# ---------------------------------------------------------------- PART 3: C1 mirror x10
-def build_c1(coin, V):
-    AN = pd.read_parquet(f'{LB}/anchors_{coin}.parquet')
-    X = pd.read_parquet(f'{LC}/dials_{coin}.parquet')
-    assert len(X) == len(AN) and (X.cb.to_numpy() == AN.closeback.to_numpy()).all(), \
-        'dials alignment gate FAIL'
-    OM = AN.merge(V, on=['wdate','mark','price','t0'], validate='1:1')[OCOLS]
-    assert len(OM) == len(AN)
-    W = pd.concat([X.reset_index(drop=True), OM.reset_index(drop=True)], axis=1)
-    dials = [c for c in X.columns if c not in ('cb','pl','mark')]
-    PP, TT = [], []
-    for k, sink in [(2, PP), (3, TT)]:
-        for combo in combinations(dials, k):
-            g = W.groupby(list(combo), observed=True)[OCOLS].agg(['count','sum']).reset_index()
-            binstr = g[list(combo)].astype(str).agg(' | '.join, axis=1)
-            for oc in OCOLS:
-                n = g[(oc,'count')]; s = g[(oc,'sum')]
-                m = n >= 50
-                if not m.any(): continue
-                sink.append(pd.DataFrame({'coin': coin, 'combo': ' + '.join(combo),
-                    'bins': binstr[m].to_numpy(), 'outcome': oc,
-                    'n': n[m].to_numpy(int), 's': s[m].to_numpy(float)}))
-    return PP, TT
-
-def flush(rows_or_dfs, name, keys, cols=None):
-    if not rows_or_dfs: return None
-    df = pd.concat(rows_or_dfs, ignore_index=True) if isinstance(rows_or_dfs[0], pd.DataFrame) \
-         else pd.DataFrame(rows_or_dfs, columns=cols)
-    p = f'{OUT}/{name}.parquet'
-    if os.path.exists(p):
-        df = pd.concat([pd.read_parquet(p), df]).drop_duplicates(subset=keys, keep='last')
-    df.to_parquet(p, compression='zstd', index=False); return df
-
-# ---------------------------------------------------------------- main
-any_fail = False
-for coin in COINS:
-    if coin in st['done']: print(coin, 'done'); continue
-    if (time.time()-T0)/60 > A_.budget_min - 12: print('budget; resume'); break
-    t_c = time.time()
-    V, uni, ok = build_vectors(coin)
-    if not ok:
-        print(f'VECTOR GATE FAIL on {coin} — STOP.'); any_fail = True; break
-    POf, PSh, PDy = build_b(coin, V)
-    flush(POf, 'bprof_offsets', ['coin','tf','component','offset','bin','outcome'],
-          ['coin','tf','component','offset','bin','outcome','n','s'])
-    flush(PSh, 'bprof_shape', ['coin','tf','component','bin','outcome'],
-          ['coin','tf','component','bin','outcome','n','s'])
-    flush(PDy, 'bprof_day', ['coin','component','bin','outcome'],
-          ['coin','component','bin','outcome','n','s'])
-    st['uni'][coin] = uni; st['done'].append(coin)
-    json.dump(st, open(SF, 'w')); print(f'{coin} B done {round((time.time()-t_c)/60,2)}min', flush=True)
-for coin in COINS:
-    if any_fail or coin in st['c1done'] or coin not in st['done']: continue
-    if (time.time()-T0)/60 > A_.budget_min - 8: print('budget; resume'); break
-    V = pd.read_parquet(f'{OUT}/anchor_outcomes_{coin}.parquet')
-    PP, TT = build_c1(coin, V)
-    flush(PP, 'c1ep_pairs', ['coin','combo','bins','outcome'])
-    flush(TT, 'c1ep_triples', ['coin','combo','bins','outcome'])
-    st['c1done'].append(coin); json.dump(st, open(SF, 'w')); print(f'{coin} C1 done', flush=True)
-
-if not any_fail and all(c in st['c1done'] for c in COINS):
-    Po = pd.read_parquet(f'{OUT}/bprof_offsets.parquet')
-    lines = [f'# B/C vs EPISODE OUTCOMES (UNADJUSTED) — {pd.Timestamp.now(tz="UTC")}',
-             f'bprof_offsets {len(Po):,} cells · bprof_day {len(pd.read_parquet(f"{OUT}/bprof_day.parquet")):,} · '
-             f'bprof_shape {len(pd.read_parquet(f"{OUT}/bprof_shape.parquet")):,} · '
-             f'c1ep_pairs {len(pd.read_parquet(f"{OUT}/c1ep_pairs.parquet")):,} · '
-             f'c1ep_triples {len(pd.read_parquet(f"{OUT}/c1ep_triples.parquet")):,}',
-             'vector universes per coin (n, base rate):']
+def run():
+    acc = {}   # (coin,family,side,basis,ruler,a,b) -> counters
+    def bump(k, field, v=1):
+        c = acc.setdefault(k, {'win':0,'loss':0,'amb':0,'nei':0,'na':0,'sumRwin':0.0,'sumcb':0.0,'sumsat':0.0,'nsat':0})
+        c[field] += v
+    recon = []
     for coin in COINS:
-        for oc, (n, b) in st['uni'][coin].items():
-            lines.append(f'  {coin} {oc}: n={n:,} base={b:.4f}')
-    Po['rate'] = Po.s / Po.n
-    base = Po.groupby(['coin','tf','outcome']).apply(
-        lambda g: g.s.sum()/g.n.sum(), include_groups=False).rename('b').reset_index()
-    P2 = Po.merge(base, on=['coin','tf','outcome']); P2['lift'] = (P2.rate - P2.b).abs()
-    lines.append('top lifts per outcome (offsets cells, n>=2000):')
-    for oc in OCOLS:
-        t = P2[(P2.outcome == oc) & (P2.n >= 2000)].sort_values('lift', ascending=False).head(3)
-        for r in t.itertuples():
-            lines.append(f'  {oc}: {r.coin} {r.tf} {r.component} off{r.offset} bin {r.bin}: '
-                         f'{r.rate:.3f} vs {r.b:.3f} (n={r.n:,})')
-    lines.append('(b)-LINES: everything mirrored from b2/c1 — anchor = first 5m bar containing the '
-                 'ET mark; offset 0 = last completed bar before the touch bar; fixed bins as coded; '
-                 'dial matrices re-used after the cb alignment gate; floor n>=50 on combo cells only. '
-                 'Vectors: NaN = out of universe, counted; trade vectors carry the entry-bar and '
-                 'same-bar third-outcome rules; ATRp = prior-day ATR14; STRUCT = corridor. '
-                 'UNADJUSTED BY SVET\'S WORD: pre-ruling ATRp denominators run as signed; ruling 1 '
-                 'governs future tables. Counts only; verdicts are Svet\'s.')
-    open(f'{OUT}/REPORT.md', 'w').write('\n'.join(lines) + '\n')
-    print('REPORT written')
+        t_c = time.time()
+        E = pd.read_parquet(f'{EPD}/episodes_{coin}.parquet',
+            columns=['wdate','mark','price','t0','corridor_up_price','corridor_dn_price'])
+        A = pd.read_parquet(f'results/layerb/anchors_{coin}.parquet',
+            columns=['wdate','mark','price','t0','open_side'])
+        D = pd.read_parquet(f'results/record/bars_{coin}_1D.parquet', columns=['wdate','atr14_1d'])
+        D['wdate'] = D.wdate.astype(str); D = D.sort_values('wdate')
+        D['atr_prior'] = D.atr14_1d.shift(1)   # EX-ANTE ATR ruler (deviation from stored same-day column, named)
+        E = E.merge(A, on=['wdate','mark','price','t0'], validate='1:1')
+        E = E.merge(D[['wdate','atr_prior']], on='wdate', how='left')
+        X = pd.read_parquet(f'{EPD}/episode_exc_{coin}.parquet',
+            columns=['wdate','mark','t0','basis','side','seq','px','at']).sort_values(
+            ['wdate','mark','t0','basis','side','seq'])
+        meta = E.set_index(['wdate','mark','t0'])
+        n_el = {'ATRp':{'fade':0,'rt':0},'STRUCT':{'fade':0,'rt':0}}
+        for (wd, mk, t0v, basis), g in X.groupby(['wdate','mark','t0','basis'], sort=False):
+            m_ = meta.loc[(wd, mk, t0v)]
+            m = float(m_.price); osd = int(m_.open_side)
+            d = osd if basis == 'fade' else -osd
+            fv = g[g.side == 'fav']; av = g[g.side == 'adv']
+            fex = (d*(fv.px.to_numpy() - m)); fat = fv['at'].values.astype('datetime64[ns]').astype(np.int64)
+            aex = (-d*(av.px.to_numpy() - m)); aat = av['at'].values.astype('datetime64[ns]').astype(np.int64)
+            if not (np.all(np.diff(fex) > 0) and np.all(np.diff(aex) > 0)):
+                print(f'FATAL: non-monotone staircase {coin} {wd} {mk} {basis}'); sys.exit(1)
+            fam_, side_ = fam(mk), ('from_above' if osd == 1 else 'from_below')
+            atr = float(m_.atr_prior) if pd.notna(m_.atr_prior) else np.nan
+            cu, cd = m_.corridor_up_price, m_.corridor_dn_price
+            ahead  = (cu - m) if d == 1 else (m - cd) if d == -1 else np.nan
+            behind = (m - cd) if d == 1 else (cu - m)
+            ahead  = float(ahead) if pd.notna(ahead) else np.nan
+            behind = float(behind) if pd.notna(behind) else np.nan
+            ok_atr = np.isfinite(atr); ok_st = np.isfinite(ahead) and np.isfinite(behind)
+            if ok_atr: n_el['ATRp'][basis] += 1
+            if ok_st:  n_el['STRUCT'][basis] += 1
+            entry_at = fat[0]   # the basis's entry bar (touch bar / retest-touch bar)
+            for ruler, a, b in GEOMS:
+                k = (coin, fam_, side_, basis, ruler, a, b)
+                if ruler == 'ATRp':
+                    if not ok_atr: bump(k,'na'); continue
+                    s_thr, t_thr = a*atr, b*atr
+                else:
+                    if not ok_st: bump(k,'na'); continue
+                    s_thr, t_thr = a*behind, b*ahead
+                i = int(np.searchsorted(aex, s_thr)); j = int(np.searchsorted(fex, t_thr))
+                tstop = aat[i] if i < len(aat) else INF
+                ttgt  = fat[j] if j < len(fat) else INF
+                first = min(tstop, ttgt)
+                if first == INF: bump(k,'nei')
+                elif first == entry_at or tstop == ttgt:
+                    # entry-bar rule: any resolution on the entry bar is same-bar with the
+                    # entry moment itself -> the third outcome (the touch splits the bar)
+                    bump(k,'amb')
+                elif ttgt < tstop:
+                    bump(k,'win'); bump(k,'sumRwin', t_thr/s_thr); bump(k,'sumcb', m/s_thr)
+                    if ok_atr: bump(k,'sumsat', s_thr/atr); bump(k,'nsat')
+                else:
+                    bump(k,'loss'); bump(k,'sumcb', m/s_thr)
+                    if ok_atr: bump(k,'sumsat', s_thr/atr); bump(k,'nsat')
+        recon.append((coin, dict(n_el)))
+        print(f'{coin}: bases fade/rt ATRp {n_el["ATRp"]["fade"]:,}/{n_el["ATRp"]["rt"]:,} · '
+              f'STRUCT {n_el["STRUCT"]["fade"]:,}/{n_el["STRUCT"]["rt"]:,} · {round((time.time()-t_c)/60,2)}min')
+
+    # pooled rollups: coin ALL4 and family ALL (additive counters -> exact pooling)
+    def rollup(rows, pos, label):
+        out = {}
+        for k, c in rows.items():
+            kk = list(k); kk[pos] = label; kk = tuple(kk)
+            o = out.setdefault(kk, {'win':0,'loss':0,'amb':0,'nei':0,'na':0,'sumRwin':0.0,'sumcb':0.0,'sumsat':0.0,'nsat':0})
+            for f in o: o[f] += c[f]
+        return out
+    allc = dict(acc); allc.update(rollup(acc, 0, 'ALL4'))
+    allc.update(rollup(allc, 1, 'ALL'))
+
+    rows = []
+    for k, c in allc.items():
+        nd = c['win'] + c['loss']
+        p = c['win']/nd if nd else np.nan
+        mR = c['sumRwin']/c['win'] if c['win'] else np.nan
+        mc_hi = TOLL_HI*c['sumcb']/nd if nd else np.nan
+        mc_lo = TOLL_LO*c['sumcb']/nd if nd else np.nan
+        gross = (c['sumRwin'] - c['loss'])/nd if nd else np.nan
+        msat = c['sumsat']/c['nsat'] if c['nsat'] else np.nan
+        rows.append(k + (nd, c['win'], c['loss'], c['amb'], c['nei'], c['na'], p, mR,
+                         gross, mc_hi, mc_lo,
+                         (gross - mc_hi) if nd else np.nan, (gross - mc_lo) if nd else np.nan, msat))
+    L = pd.DataFrame(rows, columns=['coin','family','side','basis','ruler','stop_k','tgt_k',
+        'n_dec','n_win','n_loss','n_amb','n_nei','n_na','p_win_dec','mean_R_win',
+        'ev_R_gross','cost_R_135bp','cost_R_45bp','ev_R_135bp','ev_R_45bp','mean_stop_atr'])
+    assert not L.duplicated(['coin','family','side','basis','ruler','stop_k','tgt_k']).any()
+    # cross-coin consistency on pooled rows
+    kcols = ['family','side','basis','ruler','stop_k','tgt_k']
+    pc = L[L.coin.isin(COINS)].copy()
+    for col, out in (('ev_R_135bp','agree4_135'), ('ev_R_45bp','agree4_45')):
+        pooled = L[L.coin == 'ALL4'][kcols + [col]].rename(columns={col: 'pooled'})
+        j = pc[kcols + ['coin', col]].merge(pooled, on=kcols)
+        j['ag'] = ((j[col] > 0) == (j.pooled > 0)) & np.isfinite(j[col]) & np.isfinite(j.pooled)
+        ag = j.groupby(kcols, as_index=False).ag.sum().rename(columns={'ag': out})
+        L = L.merge(ag, on=kcols, how='left')
+    L = L.sort_values('n_dec', ascending=False).reset_index(drop=True)
+    L.to_parquet(f'{OUT}/ledger_cells.parquet', compression='zstd', index=False)
+
+    # reconciliation: per coin/ruler/basis: outcomes sum == eligible x n_geoms; na == ineligible x n_geoms
+    lines = [f'# LEDGER — sequenced stop x target from episode grain — {pd.Timestamp.now(tz="UTC")}',
+             f'cells (incl. ALL4/ALL rollups): {len(L):,} · file sorted n_dec descending · no floors, no pruning']
+    ok_all = True
+    base = L[L.coin.isin(COINS) & (L.family != 'ALL')]
+    for coin, nl in recon:
+        for ruler, ng in (('ATRp', NG_ATR), ('STRUCT', NG_ST)):
+            for basis in ('fade','rt'):
+                sub = base[(base.coin==coin)&(base.ruler==ruler)&(base.basis==basis)]
+                got = int((sub.n_win+sub.n_loss+sub.n_amb+sub.n_nei).sum())
+                exp = nl[ruler][basis]*ng
+                ok = got == exp; ok_all &= ok
+                lines.append(f'recon {coin} {ruler} {basis}: outcomes {got:,} == eligible x geoms {exp:,} '
+                             f'{"PASS" if ok else "FAIL"} · na {int(sub.n_na.sum()):,}')
+    # page-one views into the md (the file carries the read; parquet carries every cell)
+    PA = L[(L.coin=='ALL4') & (L.family=='ALL')]
+    def piv(basis, ruler, col):
+        return PA[(PA.basis==basis)&(PA.ruler==ruler)].pivot_table(
+            index='stop_k', columns='tgt_k', values=col, aggfunc='first').round(3).to_string()
+    for basis in ('fade','rt'):
+        lines.append(f'\n## whole-population grid — {basis} · ATR-prior ruler (ALL4 x ALL families)')
+        lines.append('p_win_dec:\n' + piv(basis,'ATRp','p_win_dec'))
+        lines.append('EV_R @13.5bp:\n' + piv(basis,'ATRp','ev_R_135bp'))
+        lines.append('EV_R @4.5bp:\n' + piv(basis,'ATRp','ev_R_45bp'))
+        lines.append('ambiguous n (same-bar incl. entry-bar rule):\n' + PA[(PA.basis==basis)&(PA.ruler=='ATRp')].pivot_table(index='stop_k',columns='tgt_k',values='n_amb',aggfunc='first').to_string())
+        lines.append(f'\n## whole-population grid — {basis} · STRUCTURAL ruler (corridor)')
+        lines.append('EV_R gross (before toll):\n' + piv(basis,'STRUCT','ev_R_gross'))
+        lines.append('EV_R @13.5bp:\n' + piv(basis,'STRUCT','ev_R_135bp'))
+        lines.append('mean stop in ATR-prior units (cross-ruler line):\n' + piv(basis,'STRUCT','mean_stop_atr'))
+    pos135 = L[(L.coin=='ALL4')&(L.ev_R_135bp>0)]
+    pos45  = L[(L.coin=='ALL4')&(L.ev_R_45bp>0)]
+    lines.append(f'\n## cost-clearing scan (pooled cells, incl. family cells)')
+    lines.append(f'cells EV>0 @13.5bp: {len(pos135)} (of {len(L[L.coin=="ALL4"])}) · with 4/4 coin agreement: {int((pos135.agree4_135==4).sum())}')
+    lines.append(f'cells EV>0 @4.5bp:  {len(pos45)} · with 4/4 coin agreement: {int((pos45.agree4_45==4).sum())}')
+    top = pos135[pos135.agree4_135==4].sort_values('n_dec',ascending=False).head(15)
+    if len(top):
+        lines.append('page-one of the 4/4-consistent cost-clearing cells (by n_dec):')
+        lines.append(top[['family','side','basis','ruler','stop_k','tgt_k','n_dec','n_amb','n_nei','p_win_dec','ev_R_gross','ev_R_135bp','ev_R_45bp','agree4_135']].to_string(index=False))
+    neg = L[(L.coin=='ALL4')&(L.ev_R_135bp<0)&(L.agree4_135==4)]
+    lines.append(f'cells EV<0 @13.5bp with 4/4 agreement (the consistent do-not corners): {len(neg)}')
+    tpc = L[L.coin.isin(COINS)].sort_values('n_dec',ascending=False).head(12)
+    lines.append('\nlargest per-coin cells (n_dec desc):')
+    lines.append(tpc[['coin','family','side','basis','ruler','stop_k','tgt_k','n_dec','n_amb','p_win_dec','ev_R_135bp']].to_string(index=False))
+    lines.append('conventions: WIN = favorable >= target strictly before adverse >= stop, off the exc staircases; '
+                 'equal 5m timestamps = AMBIGUOUS (third outcome, counted); ENTRY-BAR RULE: any resolution on the entry bar is same-bar with the entry moment (the touch splits the bar) and is also the third outcome — the touch bar\'s bounce-side extreme can predate the touch, so scoring it decided would be a within-bar guess; neither by window end = NEITHER; '
+                 'ATRp ruler = PRIOR-day ATR14 (stored atr14_1d includes the current day — lookahead as a stop '
+                 'denominator — so shift(1) derived at query time; record untouched; one-word swap re-runs U or '
+                 'same-day ATR); STRUCT ruler = corridor gaps ex-ante (1.0 = the corridor mark); costs = round-trip '
+                 'toll x price / stop per episode, tolls 13.5bp (historical taker) and 4.5bp (spot-maker ~ 1/3 FTMO), '
+                 'parameters attached; EV in R per decided trade, amb/nei excluded and shown. Verdicts are Svet\'s.')
+    open(f'{OUT}/LEDGER.md','w').write('\n'.join(lines) + '\n')
+    print('\n'.join(lines[:2])); print(f'recon: {"ALL PASS" if ok_all else "FAIL"}')
+    if not ok_all: sys.exit(1)
+    return L
+
+docs_step()
+L = run()
 print(f'total {round((time.time()-T0)/60,2)} min · deterministic, no RNG')
-sys.exit(1 if any_fail else 0)
