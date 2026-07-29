@@ -1,4 +1,4 @@
-# B/C vs EPISODE OUTCOMES (UNADJUSTED) — 2026-07-29 16:24:23.375246+00:00
+# B/C vs EPISODE OUTCOMES (UNADJUSTED) — 2026-07-29 17:25:14.413013+00:00
 bprof_offsets 517,000 cells · bprof_day 768 · bprof_shape 2,003 · c1ep_pairs 90,291 · c1ep_triples 1,377,398
 vector universes per coin (n, base rate):
   BTC o1_closed_beyond: n=16,657 base=0.9401
