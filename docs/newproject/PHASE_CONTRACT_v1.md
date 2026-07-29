@@ -58,3 +58,9 @@ the record: ~2.97M bar-rows, 4 coins, 5 TFs, repo-resident, probe-sealed.
 No strategy-language numbers — no win rates, no R, no expectancy — anywhere in shipped
 output until computed from EPISODE grain, where entry, stop, target and their ORDER are
 measured. Until then, situation-language only: hold rates, penetration depths, separations.
+
+## v1.2 — QUESTION LEDGER (Svet's order in chat, 2026-07-28; running e2_ledger.py = the signature)
+Svet's destination questions are tracked in docs/newproject/QUESTION_LEDGER.md with status
+ANSWERED / PARTIAL / NOT-YET. Every shipment's report carries the ledger block with statuses
+as of that shipment; statuses are proposed by shipments and stand only until Svet's word.
+A shipment that advances no ledger question says so. Adding a question = Svet's word, one line.
