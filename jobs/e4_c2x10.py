@@ -100,8 +100,22 @@ for coin in COINS:
         gate(f'{coin} G2 dials',list(dd.name)==names and list(dd.nbins)==list(nbs),f'{Dn} dials vs dict {len(dd)}')
     else: print(f'{coin} G2 dials: SKIP (TEST_PAIR_STRIDE={STRIDE})',flush=True)
     bases=np.array([UNI[coin][o][1] for o in VEC])
-    ip=[];ic=[];itot=[]; iseps=[[] for _ in range(10)]
-    ch_p=[];ch_c=[];ch_rows=[]
+    NP=Dn*(Dn-1)//2
+    ic=np.zeros(NP,np.int16); itot=np.zeros(NP,np.int64); iseps=np.zeros((10,NP),np.float32)
+    ch_p=[];ch_c=[];ch_rows=[]; ch_n=0; parts=[]
+    PART_ROWS=int(os.environ.get('PART_ROWS','6000000'))
+    pdir=f'/tmp/parts_{coin}'; os.makedirs(pdir,exist_ok=True)
+    for f_ in os.listdir(pdir): os.remove(f'{pdir}/{f_}')
+    def flush():
+        global ch_p,ch_c,ch_rows,ch_n
+        if ch_n==0: return
+        R=np.concatenate(ch_rows,axis=1)
+        P=pd.DataFrame({'pair_id':np.concatenate(ch_p),'cell':np.concatenate(ch_c),'n':R[0]})
+        for vi,o in enumerate(VEC): P[f's_{o}']=R[1+vi]
+        for pi_,vi in enumerate(PARTIAL): P[f'n_{VEC[vi]}']=R[11+pi_]
+        fp=f'{pdir}/cells10_{coin}_part{len(parts):03d}.parquet'
+        P.to_parquet(fp,compression='zstd',index=False); parts.append((fp,len(P)))
+        ch_p=[];ch_c=[];ch_rows=[]; ch_n=0
     pid=0; t_last=time.time()
     for a in range(Dn-1):
         Ma=M[:,a].astype(np.int32); nba=nbs[a]
@@ -124,53 +138,55 @@ for coin in COINS:
                 for vi in range(10):
                     wv=NV[vi]; sw=wv.sum()
                     term=np.where(wv>0,wv*np.abs(rate[vi]-bases[vi]),0.0)
-                    iseps[vi].append(float(term.sum()/sw) if sw>0 else 0.0)
+                    iseps[vi,pid]=term.sum()/sw if sw>0 else 0.0
                 ch_p.append(np.full(len(kk),pid,np.int32)); ch_c.append(kk.astype(np.int16))
                 ch_rows.append(np.rint(np.vstack([nk,S,NV[PARTIAL]])).astype(np.int32))
-            else:
-                for vi in range(10): iseps[vi].append(0.0)
-            ip.append(pid); ic.append(int(keep.sum())); itot.append(tot); pid+=1
+                ch_n+=len(kk)
+                if ch_n>=PART_ROWS: flush()
+            ic[pid]=keep.sum(); itot[pid]=tot; pid+=1
         if time.time()-t_last>120: print(f'  ..dial {a}/{Dn} {round((time.time()-T0)/60,1)}min',flush=True); t_last=time.time()
-    IX=pd.DataFrame({'pair_id':np.array(ip,np.int32),'cells':np.array(ic,np.int16),'n_total':np.array(itot,np.int64)})
-    for vi,o in enumerate(VEC): IX[f'sep_{o}']=np.array(iseps[vi],np.float32)
+    IX=pd.DataFrame({'pair_id':np.arange(NP,dtype=np.int32),'cells':ic,'n_total':itot})
+    for vi,o in enumerate(VEC): IX[f'sep_{o}']=iseps[vi]
     if STRIDE==1:
         PX=pd.read_parquet(f'{C2}/pair_index_{coin}.parquet')
         gate(f'{coin} G3 pairs',pid==len(PX),f'{pid:,} vs index {len(PX):,}')
         gate(f'{coin} G4 n_total+cells',bool(np.array_equal(IX.n_total.to_numpy(),PX.n_total.to_numpy()))
              and bool(np.array_equal(IX.cells.to_numpy(),PX.cells.to_numpy())),'per-pair exact')
     else: print(f'{coin} G3/G4: SKIP (TEST_PAIR_STRIDE={STRIDE})',flush=True)
-    R=np.concatenate(ch_rows,axis=1) if ch_rows else np.zeros((18,0),np.int32)
-    CL=pd.DataFrame({'pair_id':np.concatenate(ch_p) if ch_p else np.array([],np.int32),
-                     'cell':np.concatenate(ch_c) if ch_c else np.array([],np.int16),'n':R[0]})
-    for vi,o in enumerate(VEC): CL[f's_{o}']=R[1+vi]
-    for pi_,vi in enumerate(PARTIAL): CL[f'n_{VEC[vi]}']=R[11+pi_]
+    flush()
+    ncells=sum(l for _,l in parts)
     if STRIDE==1:
         try:
             zp0=f'/tmp/c2cells_{coin}.zip'
             if not os.path.exists(zp0): urllib.request.urlretrieve(f'{REL}/cells_{coin}.zip',zp0)
             with zipfile.ZipFile(zp0) as z: z.extract(f'cells_{coin}.parquet','/tmp/c2ref')
-            RF=pd.read_parquet(f'/tmp/c2ref/cells_{coin}.parquet')
-            ok=len(RF)==len(CL) and bool(np.array_equal(RF.pair_id.to_numpy(),CL.pair_id.to_numpy())) \
-               and bool(np.array_equal(RF.cell.to_numpy(),CL.cell.to_numpy())) \
-               and bool(np.array_equal(RF.n.to_numpy(),CL.n.to_numpy().astype(RF.n.dtype))) \
-               and bool(np.array_equal(RF.n_cb.to_numpy(),CL.s_o10_closeback.to_numpy().astype(RF.n_cb.dtype))) if 'n_cb' in RF else False
-            gate(f'{coin} G5 c2 cells',ok,f'{len(CL):,} cell rows vs released {len(RF):,}')
+            RF=pd.read_parquet(f'/tmp/c2ref/cells_{coin}.parquet'); lenRF=len(RF)
+            ok=('n_cb' in RF) and lenRF==ncells; cur=0
+            for fp,L in parts:
+                if not ok: break
+                P=pd.read_parquet(fp); Q=RF.iloc[cur:cur+L]; cur+=L
+                ok=bool(np.array_equal(Q.pair_id.to_numpy(),P.pair_id.to_numpy())) \
+                   and bool(np.array_equal(Q.cell.to_numpy(),P.cell.to_numpy())) \
+                   and bool(np.array_equal(Q.n.to_numpy(),P.n.to_numpy().astype(RF.n.dtype))) \
+                   and bool(np.array_equal(Q.n_cb.to_numpy(),P.s_o10_closeback.to_numpy().astype(RF.n_cb.dtype)))
+            del RF
+            gate(f'{coin} G5 c2 cells',ok,f'{ncells:,} cell rows vs released {lenRF:,} (streamed over {len(parts)} parts)')
         except Exception as e:
             print(f'{coin} G5 c2 cells: SKIP — release fetch/read failed ({type(e).__name__}: {str(e)[:120]})',flush=True)
             rep.append(f'{coin} G5: SKIP — {type(e).__name__}')
     else: print(f'{coin} G5: SKIP (TEST_PAIR_STRIDE={STRIDE})',flush=True)
     IX.to_parquet(f'{OUT}/index_{coin}.parquet',compression='zstd',index=False)
-    cpath=f'/tmp/cells10_{coin}.parquet'; CL.to_parquet(cpath,compression='zstd',index=False)
     zp=f'/tmp/cells10_{coin}.zip'
-    with zipfile.ZipFile(zp,'w',zipfile.ZIP_STORED) as z: z.write(cpath,f'cells10_{coin}.parquet')
+    with zipfile.ZipFile(zp,'w',zipfile.ZIP_STORED) as z:
+        for fp,_ in parts: z.write(fp,os.path.basename(fp))
     if os.environ.get('GITHUB_ACTIONS'):
         subprocess.run(['gh','release','create','c2x10','-t','C2 x 10 cell ledgers','-n','sequential pairs vs the ten episode outcome vectors'],capture_output=True)
         r=subprocess.run(['gh','release','upload','c2x10',zp,'--clobber'],capture_output=True,text=True)
         print('release upload:','OK' if r.returncode==0 else 'FAILED '+r.stderr[:200],flush=True)
-    else: print('local: release upload skipped;',zp,os.path.getsize(zp),'bytes; cell rows',len(CL),flush=True)
-    rep.append(f'{coin}: pairs {pid:,} · kept-cell rows {len(CL):,} · dials {Dn} · anchors {NA:,}')
-    st['done'].append(coin); json.dump(st,open(SF,'w')); print('DONE',coin,'| pairs',pid,'| cell rows',len(CL),flush=True)
-open(f'{OUT}/DECODE.md','w').write("cells10_{COIN}.parquet (release 'c2x10'): cell = codeA*(nbB+1)+codeB; dial ids/bins in results/layerc2/dials_dict (identical grid, G2-gated). Columns: n = anchors in cell; s_oV = win sum (NaN=0); n_oV for o3..o9 = finite count (o1/o2/o10 full universe: n_oV == n). rate = s/n_v. Floor n>=50 on total n (cell set identical to c2). index_{COIN}: per-pair cells, n_total (valid cells incl. below-floor), sep_oV = n_v-weighted mean |rate - base_v|, bases sealed in results/state/e3.json.\n")
+    else: print('local: release upload skipped;',zp,os.path.getsize(zp),'bytes; cell rows',ncells,'in',len(parts),'parts',flush=True)
+    rep.append(f'{coin}: pairs {pid:,} · kept-cell rows {ncells:,} in {len(parts)} parts · dials {Dn} · anchors {NA:,}')
+    st['done'].append(coin); json.dump(st,open(SF,'w')); print('DONE',coin,'| pairs',pid,'| cell rows',ncells,flush=True)
+open(f'{OUT}/DECODE.md','w').write("cells10_{COIN}_partNNN.parquet (release 'c2x10', concatenate parts in NNN order): cell = codeA*(nbB+1)+codeB; dial ids/bins in results/layerc2/dials_dict (identical grid, G2-gated). Columns: n = anchors in cell; s_oV = win sum (NaN=0); n_oV for o3..o9 = finite count (o1/o2/o10 full universe: n_oV == n). rate = s/n_v. Floor n>=50 on total n (cell set identical to c2). index_{COIN}: per-pair cells, n_total (valid cells incl. below-floor), sep_oV = n_v-weighted mean |rate - base_v|, bases sealed in results/state/e3.json.\n")
 rep.append(f'total {round((time.time()-T0)/60,2)} min · deterministic, no RNG')
 open(f'{OUT}/REPORT.md','w').write('\n'.join(rep)+'\n')
 print(f'total {round((time.time()-T0)/60,2)} min · deterministic, no RNG',flush=True)
